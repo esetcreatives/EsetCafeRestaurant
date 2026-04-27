@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "dev": "npm run dev --prefix frontend",
-    "build": "npm run build --prefix frontend && cp -rn frontend/.next . && cp -rn frontend/public .",
+    "build": "npm run build --prefix frontend && rm -rf .next public && cp -r frontend/.next . && cp -r frontend/public .",
     "start": "npm run start --prefix frontend",
     "lint": "npm run lint --prefix frontend"
   }
