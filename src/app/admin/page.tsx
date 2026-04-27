@@ -276,8 +276,9 @@ export default function AdminDashboard() {
   };
 
   const handleStatusChange = async (orderId: number, status: string) => {
-    const { error } = await orderAPI.updateStatus(orderId, status);
+    const { error } = await actions.updateOrderStatusAction(orderId, status);
     if (!error) updateOrderStatus(orderId, status);
+    else alert('Failed to update status: ' + error);
   };
 
   const handleSwipeTicket = (orderId: number, direction: 'left' | 'right') => {
@@ -300,13 +301,13 @@ export default function AdminDashboard() {
 
   const handlePayment = async (sessionId: number, method: string = 'cash') => {
     if (!confirm(`Confirm ${method} payment for this session?`)) return;
-    const { data, error } = await adminAPI.confirmPayment(sessionId, method);
+    const { data, error } = await actions.confirmPaymentAction(sessionId, method);
     if (!error && data) {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
       loadTables(); loadSessions(); loadReport(); loadDashboard();
     } else {
-      alert('Payment failed. Please try again.');
+      alert('Payment failed: ' + (error || 'Unknown error'));
     }
   };
 
@@ -324,13 +325,13 @@ export default function AdminDashboard() {
 
   const handleCancelSession = async (sessionId: number, tableNumber: number) => {
     if (!confirm(`Cancel session for Table ${tableNumber}? All orders will be voided.`)) return;
-    const { error } = await adminAPI.cancelSession(sessionId);
+    const { error } = await actions.cancelSessionAction(sessionId);
     if (!error) {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
       loadTables(); loadSessions();
     } else {
-      alert('Failed to cancel session.');
+      alert('Failed to cancel session: ' + error);
     }
   };
 
@@ -1124,33 +1125,53 @@ export default function AdminDashboard() {
                                 </div>
 
                                 <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                  <button
-                                    onClick={() => handleStatusChange(order.id, 'served')}
-                                    style={{
-                                      flex: 1, padding: '0.6rem', borderRadius: 12,
-                                      background: 'rgba(5,80,60,0.05)', border: '1px solid rgba(5,80,60,0.1)',
-                                      color: 'rgba(5,80,60,0.5)', cursor: 'pointer',
-                                      fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.7rem',
-                                      letterSpacing: '0.08em', textTransform: 'uppercase',
-                                      transition: 'all 0.15s ease',
-                                    }}
-                                  >
-                                    Serve
-                                  </button>
-                                  {order.status !== 'ready' && (
+                                  {order.status === 'pending' && (
                                     <button
-                                      onClick={() => handleSwipeTicket(order.id, 'right')}
+                                      onClick={() => handleStatusChange(order.id, 'preparing')}
                                       style={{
-                                        padding: '0.6rem 1rem', borderRadius: 12,
+                                        flex: 1, padding: '0.65rem', borderRadius: 12,
+                                        background: 'linear-gradient(135deg, #05503c, #0a6b51)',
+                                        border: 'none', color: '#ffffff', cursor: 'pointer',
+                                        fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.72rem',
+                                        letterSpacing: '0.06em', textTransform: 'uppercase',
+                                        boxShadow: '0 4px 12px rgba(5,80,60,0.15)',
+                                        transition: 'all 0.15s ease',
+                                      }}
+                                    >
+                                      Start Prep
+                                    </button>
+                                  )}
+                                  
+                                  {order.status === 'preparing' && (
+                                    <button
+                                      onClick={() => handleStatusChange(order.id, 'ready')}
+                                      style={{
+                                        flex: 1, padding: '0.65rem', borderRadius: 12,
                                         background: 'linear-gradient(135deg, #fdca00, #ffd845)',
                                         border: 'none', color: '#05503c', cursor: 'pointer',
                                         fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.72rem',
                                         letterSpacing: '0.06em', textTransform: 'uppercase',
-                                        boxShadow: '0 4px 16px rgba(253,202,0,0.3)',
+                                        boxShadow: '0 4px 12px rgba(253,202,0,0.25)',
                                         transition: 'all 0.15s ease',
                                       }}
                                     >
-                                      Done
+                                      Mark Ready
+                                    </button>
+                                  )}
+
+                                  {order.status === 'ready' && (
+                                    <button
+                                      onClick={() => handleStatusChange(order.id, 'served')}
+                                      style={{
+                                        flex: 1, padding: '0.65rem', borderRadius: 12,
+                                        background: 'rgba(5,80,60,0.05)', border: '1px solid rgba(5,80,60,0.1)',
+                                        color: '#05503c', cursor: 'pointer',
+                                        fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.72rem',
+                                        letterSpacing: '0.06em', textTransform: 'uppercase',
+                                        transition: 'all 0.15s ease',
+                                      }}
+                                    >
+                                      Serve
                                     </button>
                                   )}
                                 </div>

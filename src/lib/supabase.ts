@@ -46,5 +46,12 @@ if (typeof window !== 'undefined') {
 }
 
 export const supabase = isConfigured 
-  ? createClient(supabaseUrl, supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        storageKey: 'eset-cafe-restaurant-auth'
+      }
+    })
   : mockClient;

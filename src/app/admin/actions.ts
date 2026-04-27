@@ -248,3 +248,72 @@ export async function startManualSessionAction(tableNumber: number) {
      return { error: error.message };
    }
  }
+
+export async function updateOrderStatusAction(orderId: number, status: string) {
+  try {
+    const { error } = await supabaseAdmin
+      .from('orders')
+      .update({ status })
+      .eq('id', orderId);
+
+    if (error) throw error;
+    revalidatePath('/admin');
+    return { success: true };
+  } catch (error: any) {
+    console.error('Server Action Error (updateOrderStatusAction):', error);
+    return { error: error.message };
+  }
+}
+
+export async function confirmPaymentAction(sessionId: number, paymentMethod: string = 'cash') {
+  try {
+    const { data, error } = await supabaseAdmin.rpc('confirm_payment', {
+      p_session_id: sessionId,
+      p_payment_method: paymentMethod
+    });
+
+    if (error) throw error;
+    if (!data || !data.success) throw new Error(data?.error || 'Payment failed');
+
+    revalidatePath('/admin');
+    return { success: true, data: { total: data.total } };
+  } catch (error: any) {
+    console.error('Server Action Error (confirmPaymentAction):', error);
+    return { error: error.message };
+  }
+}
+
+export async function cancelSessionAction(sessionId: number) {
+  try {
+    const { data: session, error: fetchError } = await supabaseAdmin
+      .from('sessions')
+      .select('table_id')
+      .eq('id', sessionId)
+      .single();
+
+    if (fetchError || !session) throw new Error('Session not found');
+
+    // 1. Mark table as available
+    await supabaseAdmin
+      .from('tables')
+      .update({ status: 'available' })
+      .eq('id', session.table_id);
+
+    // 2. Mark session as cancelled
+    const { error: updateError } = await supabaseAdmin
+      .from('sessions')
+      .update({ 
+        status: 'cancelled', 
+        closed_at: new Date().toISOString() 
+      })
+      .eq('id', sessionId);
+
+    if (updateError) throw updateError;
+
+    revalidatePath('/admin');
+    return { success: true };
+  } catch (error: any) {
+    console.error('Server Action Error (cancelSessionAction):', error);
+    return { error: error.message };
+  }
+}

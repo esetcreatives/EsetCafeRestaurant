@@ -64,12 +64,19 @@ async function handleSupabase<T>(promise: PromiseLike<any>): Promise<ApiResponse
       console.error('Message:', error.message);
       
       if (!isFetchError) {
+        // Check auth state to help debug RLS issues, but only if it's not a network error
+        // We use a safe check that won't trigger refresh loops if the token is already known to be invalid
         try {
-          // Check auth state to help debug RLS issues, but only if it's not a network error
-          const { data: authData } = await supabase.auth.getSession();
-          const session = authData?.session;
-          console.log('Current Auth Role:', session?.user?.role || 'none (anonymous)');
-          console.log('Current User Email:', session?.user?.email || 'N/A');
+          const { data: authData, error: authError } = await supabase.auth.getSession();
+          if (!authError && authData?.session) {
+            const session = authData.session;
+            console.log('Current Auth Role:', session.user?.role || 'none (anonymous)');
+            console.log('Current User Email:', session.user?.email || 'N/A');
+          } else if (authError) {
+            console.log('Auth check skipped or failed:', authError.message);
+          } else {
+            console.log('Current Auth State: No active session (Guest)');
+          }
         } catch (e) {
           console.log('Could not retrieve session info');
         }
