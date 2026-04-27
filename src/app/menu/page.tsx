@@ -7,7 +7,7 @@ import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User } from '
 import gsap from 'gsap';
 import { useTabStore, MenuItem } from '@/store/tabStore';
 import { menuAPI, sessionAPI, orderAPI } from '@/lib/api';
-import { startManualSessionAction } from '@/app/admin/actions';
+import { startManualSessionAction, placeOrderAction } from '@/app/admin/actions';
 
 function MenuContent() {
   const searchParams = useSearchParams();
@@ -157,13 +157,14 @@ function MenuContent() {
       }
       
       const items = cartItems.map(item => ({ menu_item_id: item.id, quantity: item.quantity }));
-      const { data, error } = await orderAPI.place(sessionId, items);
+      const result = await placeOrderAction(sessionId, items);
       
-      if (data && !error) {
+      if (result.success) {
         alert('Order placed successfully! Your food will be prepared shortly.');
         clearCart();
         setShowCart(false);
       } else {
+        const error = result.error;
         if (error?.includes('closed') || error?.includes('paid')) {
           alert('Your session has expired or been closed. Please scan the QR code again to start a new session.');
           clearCart();

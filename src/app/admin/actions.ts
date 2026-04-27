@@ -214,19 +214,37 @@ export async function startManualSessionAction(tableNumber: number) {
       .single();
 
     if (createError) throw createError;
-
-    return { 
-      data: { 
-        session_id: newSession.id, 
-        table_id: table.id, 
-        table_number: tableNumber, 
-        token: table.token,
-        message: 'Session created'
-      }, 
-      success: true 
-    };
-  } catch (error: any) {
-    console.error('Server Action Error (startManualSessionAction):', error);
-    return { error: error.message };
-  }
-}
+ 
+     return { 
+       data: { 
+         session_id: newSession.id, 
+         table_id: table.id, 
+         table_number: tableNumber, 
+         token: table.token,
+         message: 'Session created'
+       }, 
+       success: true 
+     };
+   } catch (error: any) {
+     console.error('Server Action Error (startManualSessionAction):', error);
+     return { error: error.message };
+   }
+ }
+ 
+ export async function placeOrderAction(sessionId: number, items: any[], notes?: string) {
+   try {
+     const { data, error } = await supabaseAdmin.rpc('place_order', {
+       p_session_id: sessionId,
+       p_items: items,
+       p_notes: notes || ''
+     });
+ 
+     if (error) throw error;
+     if (!data.success) throw new Error(data.error);
+ 
+     return { success: true, data };
+   } catch (error: any) {
+     console.error('Server Action Error (placeOrderAction):', error);
+     return { error: error.message };
+   }
+ }
