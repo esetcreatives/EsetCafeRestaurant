@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Bricolage_Grotesque, Instrument_Sans } from "next/font/google";
+import { Analytics } from "@vercel/analytics/react";
 import "./globals.css";
 
 const bricolage = Bricolage_Grotesque({
@@ -34,6 +35,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <PageTransition>{children}</PageTransition>
+        <Analytics />
       </body>
     </html>
   );
