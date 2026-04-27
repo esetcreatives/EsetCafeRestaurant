@@ -16,7 +16,7 @@ const instrument = Instrument_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "ESET Cafe — Ethiopian Fusion Dining",
+  title: "ESET Cafe | Authentic Ethiopian Fusion",
   description: "Experience authentic Ethiopian cuisine with a modern twist. Order from your table with our digital menu.",
 };
 
