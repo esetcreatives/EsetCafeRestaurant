@@ -54,12 +54,18 @@ export async function saveMenuItem(itemData: any, id?: number) {
         .insert(itemData);
     }
 
-    if (result.error) throw result.error;
+    if (result.error) {
+      console.error('Supabase DB Error:', result.error);
+      throw result.error;
+    }
+    
+    console.log('DB Save Success for ID:', id || 'new');
     revalidatePath('/admin');
+    revalidatePath('/menu');
     return { success: true };
   } catch (error: any) {
-    console.error('Server Action Error (saveMenuItem):', error);
-    return { error: error.message };
+    console.error('Server Action Save Error:', error);
+    return { error: error.message || 'Unknown server error' };
   }
 }
 

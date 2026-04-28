@@ -427,16 +427,21 @@ export default function AdminDashboard() {
     }
 
     if (data) {
-      console.log('Image uploaded successfully:', data);
-      console.log('Image URL:', data.url);
-      setMenuForm({ ...menuForm, image_url: data.url });
-      setImagePreview(data.url);
+      console.log('Server Upload Success:', data.url);
+      setMenuForm(prev => {
+        console.log('Updating menuForm image_url from', prev.image_url, 'to', data.url);
+        return { ...prev, image_url: data.url };
+      });
+      // Don't set imagePreview to data.url immediately if we already have a base64 preview
+      // that is working. This prevents the "disappearing image" if publicUrl takes a second to propagate.
+      // We'll only update it if it's not already showing something.
+      if (!imagePreview) setImagePreview(data.url);
     }
   };
 
   const handleRemoveImage = () => {
     setImagePreview(null);
-    setMenuForm({ ...menuForm, image_url: '' });
+    setMenuForm(prev => ({ ...prev, image_url: '' }));
   };
 
   const handleSaveMenuItem = async () => {
@@ -462,25 +467,29 @@ export default function AdminDashboard() {
       price: priceNum,
     };
 
-    console.log('Saving menu item:', itemData);
+    const payload = { ...itemData };
+    console.log('Final Payload to Server:', payload);
+    if (editingItem) console.log('Target ID:', editingItem.id);
 
     if (editingItem) {
-      const { error } = await actions.saveMenuItem(itemData, editingItem.id);
-      if (!error) {
-        console.log('Menu item updated successfully');
-        loadMenu();
+      const result = await actions.saveMenuItem(payload, editingItem.id);
+      if (result.success) {
+        console.log('Update result: Success');
+        await loadMenu();
         handleCloseMenuModal();
       } else {
-        alert('Failed to update menu item: ' + error);
+        console.error('Update result: Error', result.error);
+        alert('Failed to update menu item: ' + result.error);
       }
     } else {
-      const { error } = await actions.saveMenuItem(itemData);
-      if (!error) {
-        console.log('Menu item created successfully');
-        loadMenu();
+      const result = await actions.saveMenuItem(payload);
+      if (result.success) {
+        console.log('Create result: Success');
+        await loadMenu();
         handleCloseMenuModal();
       } else {
-        alert('Failed to create menu item: ' + error);
+        console.error('Create result: Error', result.error);
+        alert('Failed to create menu item: ' + result.error);
       }
     }
   };
@@ -1656,8 +1665,34 @@ export default function AdminDashboard() {
                               background: item.is_available ? 'rgba(5,80,60,0.06)' : 'rgba(239,68,68,0.07)',
                               border: `1px solid ${item.is_available ? 'rgba(5,80,60,0.1)' : 'rgba(239,68,68,0.12)'}`,
                               display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              overflow: 'hidden'
                             }}>
-                              <Coffee size={17} strokeWidth={1.5} style={{ color: item.is_available ? '#05503c' : '#ef4444' }} />
+                              {item.image_url ? (
+                                <img 
+                                  src={item.image_url} 
+                                  alt={item.name}
+                                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                                  onLoad={(e) => {
+                                    // Ensure fallback icon is hidden if image loads
+                                    const next = e.currentTarget.nextElementSibling as HTMLElement;
+                                    if (next) next.style.display = 'none';
+                                  }}
+                                  onError={(e) => {
+                                    console.error('Image load failed for:', item.name, item.image_url);
+                                    e.currentTarget.style.display = 'none';
+                                    const next = e.currentTarget.nextElementSibling as HTMLElement;
+                                    if (next) next.style.display = 'block';
+                                  }}
+                                />
+                              ) : null}
+                              <Coffee 
+                                size={17} 
+                                strokeWidth={1.5} 
+                                style={{ 
+                                  color: item.is_available ? '#05503c' : '#ef4444',
+                                  display: item.image_url ? 'none' : 'block'
+                                }} 
+                              />
                             </div>
                             <div style={{ overflow: 'hidden', flex: 1 }}>
                               <p style={{
@@ -1665,8 +1700,20 @@ export default function AdminDashboard() {
                                 color: '#05503c', letterSpacing: '-0.02em',
                                 textDecoration: item.is_available ? 'none' : 'line-through',
                                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                                display: 'flex', alignItems: 'center', gap: '0.5rem'
                               }}>
                                 {item.name}
+                                {item.is_signature && (
+                                  <span style={{ 
+                                    display: 'inline-flex', alignItems: 'center', gap: '0.2rem',
+                                    fontSize: '0.55rem', fontWeight: 900, letterSpacing: '0.05em',
+                                    background: '#05503c', color: '#fdca00', 
+                                    padding: '0.15rem 0.4rem', borderRadius: '6px',
+                                    textTransform: 'uppercase'
+                                  }}>
+                                    <TrendingUp size={10} strokeWidth={3} /> Signature
+                                  </span>
+                                )}
                               </p>
                               <p style={{ fontSize: '0.7rem', color: 'rgba(5,80,60,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginTop: '0.15rem' }}>
                                 {item.category} · {Number(item.price).toFixed(0)} ETB
@@ -2094,33 +2141,56 @@ export default function AdminDashboard() {
                 </label>
 
                 {imagePreview ? (
-                  <div style={{ position: 'relative' }}>
+                  <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(5,80,60,0.1)' }}>
                     <img
                       src={imagePreview}
                       alt="Preview"
-                      key={imagePreview}
                       style={{
-                        width: '100%', height: 200, objectFit: 'cover',
-                        borderRadius: 12, border: '1px solid rgba(5,80,60,0.1)',
+                        width: '100%', height: 220, objectFit: 'cover',
+                        display: 'block'
                       }}
                       onError={(e) => {
                         console.error('Image preview failed to load:', imagePreview);
                         setImagePreview(null);
                       }}
                     />
-                    <button
-                      onClick={handleRemoveImage}
-                      type="button"
-                      style={{
-                        position: 'absolute', top: 8, right: 8,
-                        width: 32, height: 32, borderRadius: 8,
-                        background: 'rgba(239,68,68,0.9)', border: 'none',
-                        color: '#fff', cursor: 'pointer',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      }}
+                    <div style={{
+                      position: 'absolute', inset: 0, background: 'rgba(5,80,60,0.3)',
+                      opacity: 0, transition: 'opacity 0.2s ease',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1rem'
+                    }}
+                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.opacity = '1'}
+                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.opacity = '0'}
                     >
-                      <X size={16} />
-                    </button>
+                      <label style={{
+                        padding: '0.6rem 1.2rem', borderRadius: 10,
+                        background: '#fff', color: '#05503c',
+                        fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.75rem',
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem'
+                      }}>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleImageUpload}
+                          disabled={uploadingImage}
+                          style={{ display: 'none' }}
+                        />
+                        <Upload size={14} /> Change Image
+                      </label>
+                      <button
+                        onClick={handleRemoveImage}
+                        type="button"
+                        style={{
+                          width: 36, height: 36, borderRadius: 10,
+                          background: 'rgba(239,68,68,0.9)', border: 'none',
+                          color: '#fff', cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}
+                        title="Remove Image"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <label style={{
@@ -2189,7 +2259,7 @@ export default function AdminDashboard() {
                       fontSize: '0.85rem', color: '#05503c', cursor: 'pointer',
                     }}
                   >
-                    Available for ordering
+                    In Stock / Available
                   </label>
                 </div>
 
