@@ -275,9 +275,10 @@ img { display: block; }
   }
 }
 
-/* Add top padding to the main content area on mobile so topbar doesn't overlap */
+/* Add top and bottom padding to the main content area on mobile so topbar/bottomnav doesn't overlap */
 .admin-main {
   padding-top: 4.5rem !important; /* Space for the topbar */
+  padding-bottom: 6rem !important; /* Space for the bottom nav */
 }
 @media (min-width: 1024px) {
   .admin-main {

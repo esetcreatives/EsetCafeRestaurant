@@ -283,7 +283,24 @@ export default function AdminDashboard() {
 
   const loadOrders = async () => { const { data } = await orderAPI.getAll(); if (data && Array.isArray(data)) setOrders(data); };
   const loadSessions = async () => { const { data } = await adminAPI.getSessions(); if (data && Array.isArray(data)) setSessions(data); };
-  const loadTables = async () => { const { data } = await adminAPI.getTables(); if (data && Array.isArray(data)) setTables(data); };
+  const loadTables = async () => { 
+    const { data } = await adminAPI.getTables(); 
+    if (data && Array.isArray(data)) {
+      setTables(data);
+      
+      // Proactively fetch session orders for all occupied tables to fix the "0 orders" issue
+      const occupiedTables = data.filter(t => t.session_id);
+      for (const table of occupiedTables) {
+        if (!sessionOrders[table.session_id]) {
+          adminAPI.getSessionDetail(table.session_id).then(res => {
+            if (res.data && res.data.orders) {
+              setSessionOrders(prev => ({ ...prev, [table.session_id]: res.data.orders }));
+            }
+          });
+        }
+      }
+    } 
+  };
   const loadReport = async () => { const { data } = await adminAPI.getReport(); if (data) setReport(data); };
   const loadMenu = async () => {
     const { data } = await menuAPI.getAll();
@@ -836,16 +853,16 @@ export default function AdminDashboard() {
         {sidebarOpen && (
           <div
             onClick={() => setSidebarOpen(false)}
-            style={{ position: 'fixed', inset: 0, zIndex: 39, background: 'rgba(5,80,60,0.15)', backdropFilter: 'blur(4px)' }}
+            style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(5,80,60,0.25)', backdropFilter: 'blur(8px)' }}
           />
         )}
 
         {/* ── SIDEBAR ────────────────────────────────────────────
             On mobile: slides in from left (fixed overlay)
             On desktop (lg+): always visible, sticky           */}
-        <aside className={`admin-sidebar${sidebarOpen ? ' admin-sidebar--open' : ''}`}>
+        <aside className={`admin-sidebar${sidebarOpen ? ' admin-sidebar--open' : ''}`} style={{ zIndex: 100 }}>
           {/* Brand */}
-          <div style={{ padding: '2rem 1.5rem 1.5rem', borderBottom: '1px solid rgba(5,80,60,0.07)' }}>
+          <div style={{ padding: 'max(1.5rem, env(safe-area-inset-top)) 1.5rem 1.5rem', borderBottom: '1px solid rgba(5,80,60,0.07)' }}>
             <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.4rem', letterSpacing: '-0.04em', color: '#05503c' }}>
               ESET <span style={{ color: '#fdca00' }}>Admin</span>
             </p>
@@ -1606,7 +1623,7 @@ export default function AdminDashboard() {
                                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
                                     <div>
                                       <p style={{ fontSize: '0.62rem', letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.4)' }}>Orders</p>
-                                      <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.3rem', color: '#05503c' }}>{table.order_count}</p>
+                                      <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.3rem', color: '#05503c' }}>{orders.length || table.order_count || 0}</p>
                                     </div>
                                     <div style={{ textAlign: 'right' }}>
                                       <p style={{ fontSize: '0.62rem', letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.4)' }}>Running Total</p>
@@ -2963,19 +2980,19 @@ export default function AdminDashboard() {
 
         /* ── SIDEBAR ── */
         .admin-sidebar {
-          width: 260px;
+          width: 280px;
           height: 100svh;
           position: fixed;
-          top: 0; left: -260px;
+          top: 0; left: -280px;
           z-index: 40;
-          background: rgba(255,255,255,0.88);
-          backdrop-filter: blur(18px);
-          -webkit-backdrop-filter: blur(18px);
+          background: rgba(255,255,255,0.95);
+          backdrop-filter: blur(25px);
+          -webkit-backdrop-filter: blur(25px);
           border-right: 1px solid rgba(5,80,60,0.08);
-          box-shadow: 4px 0 40px rgba(5,80,60,0.05);
+          box-shadow: 12px 0 40px rgba(5,80,60,0.08);
           display: flex; flex-direction: column;
-          transition: left 0.3s cubic-bezier(0.4,0,0.2,1);
-          padding-top: 4rem;
+          transition: left 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+          padding-top: 0; /* Removed excessive padding */
         }
         .admin-sidebar--open { left: 0; }
 

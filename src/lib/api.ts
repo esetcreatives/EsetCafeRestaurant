@@ -254,7 +254,41 @@ export const orderAPI = {
       }
       return res;
     }));
-  }
+  },
+  getSessionOrders: (sessionId: number) =>
+    handleSupabase(
+      supabase.from('orders')
+        .select('*, order_items(*, menu_items(name))')
+        .eq('session_id', sessionId)
+        .order('placed_at', { ascending: false })
+        .then((res: any) => {
+          if (res.data) {
+            res.data = res.data.map((o: any) => ({
+              ...o,
+              items: o.order_items.map((oi: any) => ({
+                ...oi,
+                name: oi.menu_items?.name
+              }))
+            }));
+          }
+          return res;
+        })
+    ),
+  subscribeToOrders: (sessionId: number, onUpdate: (payload: any) => void) => {
+    return supabase
+      .channel(`session-orders-${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        (payload: any) => onUpdate(payload)
+      )
+      .subscribe();
+  },
 };
 
 // Admin API
@@ -376,7 +410,9 @@ export const adminAPI = {
     handleSupabase(supabase.from('sessions').select('*, tables(number)').order('opened_at', { ascending: false })),
   getTables: () =>
     handleSupabase(
-      supabase.from('tables').select('*, sessions(*)').order('number')
+      supabase.from('tables')
+        .select('*, sessions(*)')
+        .order('number')
         .then((res: any) => {
           if (res.data) {
             res.data = res.data.map((t: any) => {

@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User } from 'lucide-react';
+import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell } from 'lucide-react';
 import gsap from 'gsap';
 import useSWR from 'swr';
 import { useTabStore, MenuItem } from '@/store/tabStore';
@@ -25,6 +25,8 @@ function MenuContent() {
   const [manualLoading, setManualLoading] = useState(false);
   const [pendingItem, setPendingItem] = useState<MenuItem | null>(null);
   const [taxSettings, setTaxSettings] = useState({ vat_rate: 0.15, service_charge_rate: 0.10 });
+  const [activeOrders, setActiveOrders] = useState<any[]>([]);
+  const [showTracker, setShowTracker] = useState(false);
 
   const {
     sessionId,
@@ -116,6 +118,33 @@ function MenuContent() {
     });
   }, [searchParams]);
 
+  // Handle Order Real-time Tracking
+  useEffect(() => {
+    if (!sessionId) return;
+
+    // 1. Initial fetch
+    const fetchOrders = async () => {
+      const { data } = await orderAPI.getSessionOrders(sessionId);
+      if (data) setActiveOrders(data);
+    };
+    fetchOrders();
+
+    // 2. Subscribe to changes
+    const channel = orderAPI.subscribeToOrders(sessionId, (payload) => {
+      console.log('Order Change Received:', payload);
+      fetchOrders(); // Re-fetch on any change for simplicity/reliability
+      
+      // If an order became 'ready', maybe show tracker or play sound (future)
+      if (payload.new && payload.new.status === 'ready' && payload.old && payload.old.status !== 'ready') {
+        setShowTracker(true);
+      }
+    });
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [sessionId]);
+
   // Initial animation
   useEffect(() => {
     if (!menuLoading && menuItems.length > 0) {
@@ -198,9 +227,10 @@ function MenuContent() {
       const result = await placeOrderAction(sessionId, items, '', sessionToken || '');
       
       if (result.success) {
-        alert('Order placed successfully! Your food will be prepared shortly.');
+        // Success notification handled by state/subscription
         clearCart();
         setShowCart(false);
+        setShowTracker(true);
       } else {
         const error = result.error;
         const errorCode = (result as any).errorCode;
@@ -594,6 +624,136 @@ function MenuContent() {
                 {manualLoading ? 'Joining...' : 'Start Ordering'}
               </button>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Order Tracker Floating Toggle */}
+      {activeOrders.length > 0 && !showTracker && (
+        <button
+          onClick={() => setShowTracker(true)}
+          style={{
+            position: 'fixed', bottom: '2rem', left: '1.5rem', zIndex: 90,
+            background: '#ffffff', border: '1px solid rgba(5,80,60,0.1)',
+            borderRadius: '9999px', padding: '0.75rem 1.25rem',
+            display: 'flex', alignItems: 'center', gap: '0.75rem',
+            boxShadow: '0 10px 40px rgba(5,80,60,0.1)',
+            cursor: 'pointer', fontFamily: 'var(--font-bricolage)', fontWeight: 800,
+            color: '#05503c', fontSize: '0.85rem'
+          }}
+        >
+          <div style={{ position: 'relative' }}>
+            <Bell size={18} style={{ color: '#fdca00' }} />
+            {activeOrders.some(o => o.status === 'ready') && (
+              <span style={{ position: 'absolute', top: -4, right: -4, width: 8, height: 8, background: '#ef4444', borderRadius: '50%' }} />
+            )}
+          </div>
+          Track Order
+        </button>
+      )}
+
+      {/* Order Tracker Modal/Panel */}
+      {showTracker && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 120, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(5,80,60,0.15)', backdropFilter: 'blur(8px)' }} onClick={() => setShowTracker(false)} />
+          <div style={{
+            position: 'relative', width: 'min(100%, 600px)', maxHeight: '80vh',
+            background: '#F9F9F9', borderRadius: '32px 32px 0 0',
+            boxShadow: '0 -10px 60px rgba(5,80,60,0.15)',
+            display: 'flex', flexDirection: 'column', overflow: 'hidden'
+          }}>
+            <div style={{ padding: '1.5rem 2rem', borderBottom: '1px solid rgba(5,80,60,0.07)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(253,202,0,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fdca00' }}>
+                  <Clock size={20} />
+                </div>
+                <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.25rem', color: '#05503c' }}>Order Progress</h2>
+              </div>
+              <button onClick={() => setShowTracker(false)} style={{ background: 'rgba(5,80,60,0.05)', border: 'none', width: 36, height: 36, borderRadius: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#05503c' }}><X size={18} /></button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', padding: '2rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+                {activeOrders.map((order) => {
+                  const isReady = order.status === 'ready';
+                  const isPreparing = order.status === 'preparing';
+
+                  return (
+                    <div key={order.id} style={{
+                      background: '#fff', borderRadius: 24, padding: '1.5rem',
+                      border: isReady ? '2px solid #fdca00' : '1px solid rgba(5,80,60,0.06)',
+                      boxShadow: isReady ? '0 10px 30px rgba(253,202,0,0.15)' : 'none'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                        <div>
+                          <p style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', color: 'rgba(5,80,60,0.3)', letterSpacing: '0.1em' }}>Order #{order.id.toString().slice(-4)}</p>
+                          <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.1rem', color: '#05503c' }}>
+                            {order.items.length} {order.items.length === 1 ? 'item' : 'items'}
+                          </p>
+                        </div>
+                        <div style={{
+                          padding: '0.4rem 0.8rem', borderRadius: 10,
+                          background: isReady ? '#fdca00' : isPreparing ? 'rgba(5,80,60,0.1)' : 'rgba(5,80,60,0.05)',
+                          color: '#05503c',
+                          fontFamily: 'var(--font-bricolage)', fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase'
+                        }}>
+                          {order.status === 'ready' ? 'Ready!' : order.status === 'preparing' ? 'In Kitchen' : 'Received'}
+                        </div>
+                      </div>
+
+                      {/* Progress Stepper */}
+                      <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', padding: '0 1rem', marginBottom: '1.5rem' }}>
+                        {/* Line */}
+                        <div style={{ position: 'absolute', top: 15, left: '10%', right: '10%', height: 2, background: 'rgba(5,80,60,0.06)', zIndex: 0 }} />
+                        <div style={{ 
+                          position: 'absolute', top: 15, left: '10%', 
+                          width: isReady ? '80%' : isPreparing ? '40%' : '0%', 
+                          height: 2, background: '#fdca00', zIndex: 1, transition: 'width 0.8s ease' 
+                        }} />
+
+                        {/* Steps */}
+                        {[
+                          { label: 'Sent', icon: CheckCircle, active: true },
+                          { label: 'Preparing', icon: ChefHat, active: isPreparing || isReady },
+                          { label: 'Ready', icon: Bell, active: isReady },
+                        ].map((step, sIdx) => {
+                          const Icon = step.icon;
+                          const active = step.active;
+                          return (
+                            <div key={sIdx} style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                              <div style={{
+                                width: 32, height: 32, borderRadius: '50%', background: active ? '#fdca00' : '#fff',
+                                border: `2px solid ${active ? '#fdca00' : 'rgba(5,80,60,0.06)'}`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: active ? '#05503c' : 'rgba(5,80,60,0.2)',
+                                transition: 'all 0.4s ease',
+                                boxShadow: active ? '0 0 15px rgba(253,202,0,0.3)' : 'none'
+                              }}>
+                                <Icon size={14} strokeWidth={active ? 3 : 2} />
+                              </div>
+                              <span style={{ fontSize: '0.6rem', fontWeight: 800, color: active ? '#05503c' : 'rgba(5,80,60,0.3)', textTransform: 'uppercase' }}>{step.label}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ padding: '0.75rem', background: 'rgba(5,80,60,0.02)', borderRadius: 12 }}>
+                        {order.items.map((item: any, i: number) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', padding: '0.2rem 0' }}>
+                            <span style={{ color: 'rgba(5,80,60,0.6)' }}>{item.quantity}× {item.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ padding: '1.5rem', background: '#fff', textAlign: 'center' }}>
+              <p style={{ fontSize: '0.75rem', color: 'rgba(5,80,60,0.4)' }}>
+                We will notify you when your food is ready.
+              </p>
+            </div>
           </div>
         </div>
       )}
