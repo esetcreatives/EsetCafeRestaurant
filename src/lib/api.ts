@@ -3,6 +3,7 @@ import { supabase } from './supabase';
 interface ApiResponse<T = any> {
   data?: T;
   error?: string;
+  errorCode?: string;
 }
 
 // Response types (kept from original)
@@ -219,7 +220,7 @@ export const orderAPI = {
     });
 
     if (error) return { error: error.message };
-    if (!data.success) return { error: data.error };
+    if (!data.success) return { error: data.message || data.error, errorCode: data.error };
 
     return { data: { success: true, order: data, message: 'Order placed successfully' } };
   },
@@ -371,14 +372,25 @@ export const adminAPI = {
     handleSupabase(supabase.from('sessions').select('*, tables(number)').order('opened_at', { ascending: false })),
   getTables: () =>
     handleSupabase(
-      supabase.from('tables').select('*').order('number')
+      supabase.from('tables').select('*, sessions(*)').order('number')
         .then((res: any) => {
           if (res.data) {
-            res.data = res.data.map((t: any) => ({
-              ...t,
-              table_number: t.number,
-              table_status: t.status
-            }));
+            res.data = res.data.map((t: any) => {
+              // Find the active (open) session for this table
+              const activeSession = t.sessions?.find((s: any) => s.status === 'open');
+              return {
+                ...t,
+                table_number: t.number,
+                table_status: activeSession ? 'occupied' : t.status || 'available',
+                session_id: activeSession?.id,
+                opened_at: activeSession?.opened_at,
+                subtotal: activeSession?.subtotal || 0,
+                order_count: activeSession?.order_count || 0,
+                pending_count: activeSession?.pending_count || 0,
+                preparing_count: activeSession?.preparing_count || 0,
+                ready_count: activeSession?.ready_count || 0,
+              };
+            });
           }
           return res;
         })
@@ -418,4 +430,6 @@ export const adminAPI = {
     handleSupabase(supabase.from('tables').insert({ number, token: `table_${number}_${Math.random().toString(36).substr(2, 9)}`, status: 'available' })),
   deleteTable: (id: number) =>
     handleSupabase(supabase.from('tables').delete().eq('id', id)),
+  getAppSettings: () =>
+    handleSupabase(supabase.from('app_settings').select('*')),
 };

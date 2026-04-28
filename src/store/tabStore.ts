@@ -11,6 +11,7 @@ export interface MenuItem {
   image_url: string;
   is_available: boolean;
   is_signature: boolean;
+  stock_quantity: number;
 }
 
 export interface CartItem extends MenuItem {

@@ -213,6 +213,7 @@ export async function startManualSessionAction(tableNumber: number) {
       };
     }
 
+    // 3. Create new session
     const { data: newSession, error: createError } = await supabaseAdmin
       .from('sessions')
       .insert({ table_id: table.id, status: 'open' })
@@ -220,7 +221,13 @@ export async function startManualSessionAction(tableNumber: number) {
       .single();
 
     if (createError) throw createError;
- 
+
+    // 4. Update table status to occupied
+    await supabaseAdmin
+      .from('tables')
+      .update({ status: 'occupied' })
+      .eq('id', table.id);
+
      return { 
        data: { 
          session_id: newSession.id, 
@@ -238,22 +245,28 @@ export async function startManualSessionAction(tableNumber: number) {
  }
  
  export async function placeOrderAction(sessionId: number, items: any[], notes?: string) {
-   try {
-     const { data, error } = await supabaseAdmin.rpc('place_order', {
-       p_session_id: sessionId,
-       p_items: items,
-       p_notes: notes || ''
-     });
- 
-     if (error) throw error;
-     if (!data.success) throw new Error(data.error);
- 
-     return { success: true, data };
-   } catch (error: any) {
-     console.error('Server Action Error (placeOrderAction):', error);
-     return { error: error.message };
-   }
- }
+  try {
+    const { data, error } = await supabaseAdmin.rpc('place_order', {
+      p_session_id: sessionId,
+      p_items: items,
+      p_notes: notes || ''
+    });
+
+    if (error) throw error;
+    if (!data.success) {
+      // Pass back the specific error code for frontend handling
+      return { 
+        error: data.message || 'Failed to place order', 
+        errorCode: data.error 
+      };
+    }
+
+    return { success: true, data };
+  } catch (error: any) {
+    console.error('Server Action Error (placeOrderAction):', error);
+    return { error: error.message };
+  }
+}
 
 export async function updateOrderStatusAction(orderId: number, status: string) {
   try {
@@ -273,16 +286,31 @@ export async function updateOrderStatusAction(orderId: number, status: string) {
 
 export async function confirmPaymentAction(sessionId: number, paymentMethod: string = 'cash') {
   try {
+    // 1. Get official totals from DB first
+    const { data: billData, error: billError } = await supabaseAdmin.rpc('get_session_bill', {
+      p_session_id: sessionId
+    });
+
+    if (billError) throw billError;
+
+    // 2. Process payment with calculated totals
     const { data, error } = await supabaseAdmin.rpc('confirm_payment', {
       p_session_id: sessionId,
-      p_payment_method: paymentMethod
+      p_payment_method: paymentMethod,
+      p_total: billData.total // Ensure we use the server-calculated total
     });
 
     if (error) throw error;
     if (!data || !data.success) throw new Error(data?.error || 'Payment failed');
 
+    // 3. Mark table as available
+    await supabaseAdmin
+      .from('tables')
+      .update({ status: 'available' })
+      .eq('id', data.table_id);
+
     revalidatePath('/admin');
-    return { success: true, data: { total: data.total } };
+    return { success: true, data: { total: billData.total } };
   } catch (error: any) {
     console.error('Server Action Error (confirmPaymentAction):', error);
     return { error: error.message };
@@ -320,6 +348,37 @@ export async function cancelSessionAction(sessionId: number) {
     return { success: true };
   } catch (error: any) {
     console.error('Server Action Error (cancelSessionAction):', error);
+    return { error: error.message };
+  }
+}
+
+export async function resetDashboardData() {
+  try {
+    // The order is important due to potential foreign key constraints
+    // 1. Delete all payments
+    const { error: pError } = await supabaseAdmin.from('payments').delete().neq('id', -1);
+    if (pError) throw pError;
+    
+    // 2. Delete all order items
+    const { error: oiError } = await supabaseAdmin.from('order_items').delete().neq('id', -1);
+    if (oiError) throw oiError;
+    
+    // 3. Delete all orders
+    const { error: oError } = await supabaseAdmin.from('orders').delete().neq('id', -1);
+    if (oError) throw oError;
+    
+    // 4. Delete all sessions
+    const { error: sError } = await supabaseAdmin.from('sessions').delete().neq('id', -1);
+    if (sError) throw sError;
+    
+    // 5. Reset all tables to available
+    const { error: tError } = await supabaseAdmin.from('tables').update({ status: 'available' }).neq('id', -1);
+    if (tError) throw tError;
+
+    revalidatePath('/admin');
+    return { success: true };
+  } catch (error: any) {
+    console.error('Server Action Error (resetDashboardData):', error);
     return { error: error.message };
   }
 }

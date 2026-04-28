@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -25,6 +25,7 @@ const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', short: 'Home', icon: LayoutGrid, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'kitchen', label: 'Kitchen', short: 'Kitchen', icon: ChefHat, roles: ['super_admin', 'manager', 'kitchen', 'admin'] },
   { id: 'sessions', label: 'Tables', short: 'Tables', icon: Users, roles: ['super_admin', 'manager', 'admin'] },
+  { id: 'billing', label: 'Billing', short: 'Billing', icon: DollarSign, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'menu', label: 'Menu', short: 'Menu', icon: Coffee, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'admins', label: 'Admins', short: 'Admins', icon: Users, roles: ['super_admin', 'admin'] },
 ] as const;
@@ -89,17 +90,39 @@ export default function AdminDashboard() {
   const [editingItem, setEditingItem] = useState<any>(null);
   const [menuForm, setMenuForm] = useState({
     name: '',
-    category: 'appetizers',
+    category: 'coffee',
     description: '',
     ingredients: '',
     price: '',
     image_url: '',
     is_available: true,
     is_signature: false,
+    stock_quantity: '999',
   });
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [menuCategoryFilter, setMenuCategoryFilter] = useState<string>('all');
+
+  // Fetch unique categories from DB dynamically
+  const MENU_CATEGORIES = useMemo(() => {
+    const hardcoded = [
+      { id: 'appetizers', label: 'Appetizers' },
+      { id: 'mains', label: 'Mains' },
+      { id: 'sides', label: 'Sides' },
+      { id: 'desserts', label: 'Desserts' },
+      { id: 'beverages', label: 'Beverages' },
+    ];
+    
+    const dbCats = menuItems ? Array.from(new Set(menuItems.map(item => item.category))) : [];
+    const otherCats = dbCats
+      .filter(cat => !hardcoded.find(h => h.id === cat))
+      .filter(Boolean);
+
+    return [
+      ...hardcoded,
+      ...otherCats.map(cat => ({ id: cat, label: cat.charAt(0).toUpperCase() + cat.slice(1) }))
+    ];
+  }, [menuItems]);
 
   // Admin management state
   const [showAdminModal, setShowAdminModal] = useState(false);
@@ -121,6 +144,7 @@ export default function AdminDashboard() {
   const [newTableNumber, setNewTableNumber] = useState('');
   const [tableActionLoading, setTableActionLoading] = useState<number | null>(null);
   const [adminSaving, setAdminSaving] = useState(false);
+  const [resettingData, setResettingData] = useState(false);
 
   const [isClient, setIsClient] = useState(false);
   const [currentDate, setCurrentDate] = useState('');
@@ -170,12 +194,40 @@ export default function AdminDashboard() {
     });
 
     loadData();
-    polling.start('orders', loadOrders, 3000);
-    polling.start('sessions', loadSessions, 5000);
-    polling.start('tables', loadTables, 5000);
-    polling.start('dashboard', loadDashboard, 10000);
-    polling.start('report', loadReport, 15000);
-    return () => polling.stopAll();
+
+    // ── Real-time Subscriptions ────────────────────────────────
+    const ordersSub = supabase
+      .channel('orders-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
+        loadOrders();
+        loadDashboard();
+        loadSessions(); // Orders affect session totals
+      })
+      .subscribe();
+
+    const sessionsSub = supabase
+      .channel('sessions-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions' }, () => {
+        loadSessions();
+        loadTables();
+        loadDashboard();
+        loadReport();
+      })
+      .subscribe();
+
+    const tablesSub = supabase
+      .channel('tables-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables' }, () => {
+        loadTables();
+        loadDashboard();
+      })
+      .subscribe();
+
+    return () => {
+      ordersSub.unsubscribe();
+      sessionsSub.unsubscribe();
+      tablesSub.unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -189,7 +241,7 @@ export default function AdminDashboard() {
         .select('*')
         .eq('id', user.id)
         .single();
-      
+
       if (profile) {
         setAuth({
           ...user,
@@ -304,14 +356,20 @@ export default function AdminDashboard() {
     // Calculate totals for confirmation
     const session = tables.find(t => t.session_id === sessionId);
     if (!session) return;
-    
-    const sub = Number(session.subtotal) || 0;
+
+    // Resilient calculation from loaded orders
+    const orders = sessionOrders[sessionId] || [];
+    const calculatedSubtotal = orders.reduce((sum: number, o: any) =>
+      sum + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0
+    );
+
+    const sub = calculatedSubtotal || Number(session.subtotal) || 0;
     const v = sub * 0.15;
     const s = sub * 0.10;
     const tot = sub + v + s;
 
     if (!confirm(`Confirm ${method} payment?\n\nSubtotal: ${sub.toFixed(0)} ETB\nVAT (15%): ${v.toFixed(0)} ETB\nService (10%): ${s.toFixed(0)} ETB\nTotal: ${tot.toFixed(0)} ETB`)) return;
-    
+
     const { data, error } = await actions.confirmPaymentAction(sessionId, method);
     if (!error && data) {
       setExpandedTable(null);
@@ -328,8 +386,8 @@ export default function AdminDashboard() {
     setExpandedTable(isOpen ? null : table.id);
     if (!isOpen && !sessionOrders[table.session_id]) {
       const { data } = await adminAPI.getSessionDetail(table.session_id);
-      if (data && Array.isArray(data)) {
-        setSessionOrders(prev => ({ ...prev, [table.session_id]: data }));
+      if (data && data.orders) {
+        setSessionOrders(prev => ({ ...prev, [table.session_id]: data.orders }));
       }
     }
   };
@@ -343,6 +401,34 @@ export default function AdminDashboard() {
       loadTables(); loadSessions();
     } else {
       alert('Failed to cancel session: ' + error);
+    }
+  };
+
+  const handleResetDashboard = async () => {
+    if (!user || (user.role !== 'super_admin' && user.role !== 'manager' && user.role !== 'admin')) {
+      alert('You do not have permission to perform this action.');
+      return;
+    }
+
+    if (!confirm('CRITICAL WARNING: This will permanently DELETE all sales history, order history, and active sessions. This cannot be undone.\n\nAre you absolutely sure you want to reset the dashboard?')) {
+      return;
+    }
+
+    const secondConfirm = prompt('Please type "RESET" to confirm data deletion:');
+    if (secondConfirm !== 'RESET') {
+      alert('Reset cancelled.');
+      return;
+    }
+
+    setResettingData(true);
+    const { success, error } = await actions.resetDashboardData();
+    setResettingData(false);
+
+    if (success) {
+      alert('Dashboard data has been reset successfully.');
+      await loadData();
+    } else {
+      alert('Failed to reset dashboard: ' + error);
     }
   };
 
@@ -366,19 +452,21 @@ export default function AdminDashboard() {
         image_url: item.image_url || '',
         is_available: item.is_available,
         is_signature: item.is_signature || false,
+        stock_quantity: (item.stock_quantity ?? 999).toString(),
       });
       setImagePreview(item.image_url || null);
     } else {
       setEditingItem(null);
       setMenuForm({
         name: '',
-        category: 'appetizers',
+        category: 'coffee',
         description: '',
         ingredients: '',
         price: '',
         image_url: '',
         is_available: true,
         is_signature: false,
+        stock_quantity: '999',
       });
       setImagePreview(null);
     }
@@ -465,6 +553,7 @@ export default function AdminDashboard() {
       ...menuForm,
       ingredients: menuForm.ingredients.split(',').map(i => i.trim()).filter(Boolean),
       price: priceNum,
+      stock_quantity: parseInt(menuForm.stock_quantity) || 0,
     };
 
     const payload = { ...itemData };
@@ -685,7 +774,7 @@ export default function AdminDashboard() {
 
   const userRole = (user?.role || 'manager') as keyof typeof ROLE_STYLES;
   const roleStyle = ROLE_STYLES[userRole] || ROLE_STYLES.manager;
-  const initials = user?.full_name 
+  const initials = user?.full_name
     ? user.full_name.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2)
     : user?.username?.split('@')[0]?.slice(0, 2).toUpperCase() || 'AD';
 
@@ -1030,6 +1119,86 @@ export default function AdminDashboard() {
                               )}
                             </div>
                           </div>
+
+                          {/* Active Sessions Control */}
+                          <div className="glass-card-admin" style={{ borderRadius: 22, gridColumn: 'span 2' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+                              <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.2rem', letterSpacing: '-0.03em', color: '#05503c' }}>
+                                Active Table Sessions
+                              </h2>
+                              <Link href="#" onClick={(e) => { e.preventDefault(); setActiveTab('sessions'); }} style={{ fontSize: '0.75rem', fontWeight: 700, color: '#fdca00', textDecoration: 'none' }}>
+                                View All Tables
+                              </Link>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                              {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length > 0 ? (
+                                tables.filter(t => t.table_status === 'occupied' || !!t.session_id).map(table => (
+                                  <div key={table.id} style={{
+                                    padding: '1.25rem',
+                                    background: 'rgba(253,202,0,0.04)',
+                                    borderRadius: 18,
+                                    border: '1px solid rgba(253,202,0,0.2)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '1rem'
+                                  }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                      <div>
+                                        <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.4rem', color: '#05503c', lineHeight: 1 }}>
+                                          Table {table.table_number}
+                                        </p>
+                                        <p style={{ fontSize: '0.65rem', color: 'rgba(5,80,60,0.4)', marginTop: '0.25rem' }}>
+                                          Active for {getSessionDuration(table.opened_at)}
+                                        </p>
+                                      </div>
+                                      <div style={{ textAlign: 'right' }}>
+                                        <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.1rem', color: '#05503c' }}>
+                                          {(() => {
+                                            const orders = sessionOrders[table.session_id] || [];
+                                            const calculatedSubtotal = orders.reduce((sum: number, o: any) =>
+                                              sum + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0
+                                            );
+                                            const sub = calculatedSubtotal || Number(table.subtotal) || 0;
+                                            return (sub * 1.25).toFixed(0);
+                                          })()} ETB
+                                        </p>
+                                        <p style={{ fontSize: '0.6rem', color: 'rgba(5,80,60,0.35)', textTransform: 'uppercase' }}>Current Total</p>
+                                      </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                      <button
+                                        onClick={() => handleExpandTable(table).then(() => setActiveTab('sessions'))}
+                                        style={{
+                                          flex: 1, padding: '0.6rem', borderRadius: 10, border: '1px solid rgba(5,80,60,0.1)',
+                                          background: '#fff', color: '#05503c', cursor: 'pointer',
+                                          fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.75rem'
+                                        }}
+                                      >
+                                        Manage Bill
+                                      </button>
+                                      <button
+                                        onClick={() => handleCancelSession(table.session_id, table.table_number)}
+                                        style={{
+                                          padding: '0.6rem 0.8rem', borderRadius: 10, border: '1px solid rgba(239,68,68,0.2)',
+                                          background: 'rgba(239,68,68,0.05)', color: '#ef4444', cursor: 'pointer',
+                                          display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                        }}
+                                        title="Force Close Session"
+                                      >
+                                        <X size={16} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div style={{ gridColumn: 'span 100', textAlign: 'center', padding: '3rem', background: 'rgba(5,80,60,0.02)', borderRadius: 20, border: '1px dashed rgba(5,80,60,0.1)' }}>
+                                  <p style={{ color: 'rgba(5,80,60,0.3)', fontSize: '0.9rem' }}>No active sessions right now</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         </div>
 
                         {/* Financial Summary from Reports */}
@@ -1060,6 +1229,60 @@ export default function AdminDashboard() {
                                 </div>
                               ))}
                             </div>
+                          </div>
+                        )}
+
+                        {/* Reset Data Section (Privileged only) */}
+                        {(user?.role === 'super_admin' || user?.role === 'manager' || user?.role === 'admin') && (
+                          <div style={{
+                            marginTop: '2rem',
+                            padding: '2.5rem',
+                            borderRadius: 24,
+                            background: 'rgba(239,68,68,0.03)',
+                            border: '1.5px dashed rgba(239,68,68,0.15)',
+                            textAlign: 'center',
+                            maxWidth: '650px',
+                            margin: '2rem auto 0'
+                          }}>
+                            <h3 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.1rem', color: '#ef4444', marginBottom: '0.5rem' }}>
+                              Advanced System Management
+                            </h3>
+                            <p style={{ fontSize: '0.8rem', color: 'rgba(5,80,60,0.45)', marginBottom: '1.5rem', maxWidth: '500px', margin: '0 auto 1.5rem' }}>
+                              Clear all histories (sales, orders, sessions) for a fresh start. This action is permanent.
+                            </p>
+                            <button
+                              onClick={handleResetDashboard}
+                              disabled={resettingData}
+                              className="shimmer-btn"
+                              style={{
+                                padding: '0.85rem 1.8rem',
+                                borderRadius: 14,
+                                border: 'none',
+                                background: resettingData ? 'rgba(239,68,68,0.3)' : '#ef4444',
+                                color: '#fff',
+                                fontFamily: 'var(--font-bricolage)',
+                                fontWeight: 800,
+                                fontSize: '0.9rem',
+                                cursor: resettingData ? 'not-allowed' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.6rem',
+                                margin: '0 auto',
+                                boxShadow: '0 8px 25px rgba(239,68,68,0.25)'
+                              }}
+                            >
+                              {resettingData ? (
+                                <>
+                                  <div className="spinner-small" style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%' }} />
+                                  Resetting...
+                                </>
+                              ) : (
+                                <>
+                                  <RefreshCw size={18} />
+                                  Reset All Transaction Data
+                                </>
+                              )}
+                            </button>
                           </div>
                         )}
                       </>
@@ -1163,7 +1386,7 @@ export default function AdminDashboard() {
                                       Start Prep
                                     </button>
                                   )}
-                                  
+
                                   {order.status === 'preparing' && (
                                     <button
                                       onClick={() => handleStatusChange(order.id, 'ready')}
@@ -1305,10 +1528,11 @@ export default function AdminDashboard() {
                     ) : (
                       <div className="admin-card-grid">
                         {tables.map(table => {
-                          const occupied = table.table_status === 'occupied';
+                          // Resilient check: consider table occupied if status says so OR if it has an active session_id
+                          const occupied = table.table_status === 'occupied' || !!table.session_id;
                           const isExpanded = expandedTable === table.id;
                           const orders = sessionOrders[table.session_id] || [];
-                          const subtotal = Number(table.subtotal) || 0;
+                          const subtotal = (orders.reduce((sum: number, o: any) => sum + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0)) || Number(table.subtotal) || 0;
                           const vat = subtotal * 0.15;
                           const service = subtotal * 0.10;
                           const total = subtotal + vat + service;
@@ -1614,11 +1838,9 @@ export default function AdminDashboard() {
                           }}
                         >
                           <option value="all">All Categories</option>
-                          <option value="appetizers">Appetizers</option>
-                          <option value="mains">Mains</option>
-                          <option value="sides">Sides</option>
-                          <option value="desserts">Desserts</option>
-                          <option value="beverages">Beverages</option>
+                          {MENU_CATEGORIES.map((cat: any) => (
+                            <option key={cat.id} value={cat.id}>{cat.label}</option>
+                          ))}
                         </select>
                       </div>
                       {user?.role !== 'kitchen' && (
@@ -1668,8 +1890,8 @@ export default function AdminDashboard() {
                               overflow: 'hidden'
                             }}>
                               {item.image_url ? (
-                                <img 
-                                  src={item.image_url} 
+                                <img
+                                  src={item.image_url}
                                   alt={item.name}
                                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                                   onLoad={(e) => {
@@ -1685,13 +1907,13 @@ export default function AdminDashboard() {
                                   }}
                                 />
                               ) : null}
-                              <Coffee 
-                                size={17} 
-                                strokeWidth={1.5} 
-                                style={{ 
+                              <Coffee
+                                size={17}
+                                strokeWidth={1.5}
+                                style={{
                                   color: item.is_available ? '#05503c' : '#ef4444',
                                   display: item.image_url ? 'none' : 'block'
-                                }} 
+                                }}
                               />
                             </div>
                             <div style={{ overflow: 'hidden', flex: 1 }}>
@@ -1704,10 +1926,10 @@ export default function AdminDashboard() {
                               }}>
                                 {item.name}
                                 {item.is_signature && (
-                                  <span style={{ 
+                                  <span style={{
                                     display: 'inline-flex', alignItems: 'center', gap: '0.2rem',
                                     fontSize: '0.55rem', fontWeight: 900, letterSpacing: '0.05em',
-                                    background: '#05503c', color: '#fdca00', 
+                                    background: '#05503c', color: '#fdca00',
                                     padding: '0.15rem 0.4rem', borderRadius: '6px',
                                     textTransform: 'uppercase'
                                   }}>
@@ -1785,6 +2007,196 @@ export default function AdminDashboard() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* ════ BILLING VIEW ══════════════════════════════ */}
+                {activeTab === 'billing' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.4rem', color: '#05503c' }}>
+                        Active Billing
+                      </h2>
+                      <div style={{ padding: '0.5rem 1rem', borderRadius: 12, background: 'rgba(253,202,0,0.1)', border: '1px solid rgba(253,202,0,0.2)', color: '#05503c', fontSize: '0.85rem', fontWeight: 700 }}>
+                        {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length} Active Sessions
+                      </div>
+                    </div>
+
+                    {/* Billing Stats */}
+                    <div className="admin-stat-grid" style={{ marginBottom: '1rem' }}>
+                      {[
+                        { label: 'Unpaid Revenue', val: `${tables.reduce((sum, t) => sum + (Number(t.subtotal) || 0) * 1.25, 0).toLocaleString()} ETB`, icon: DollarSign, accent: '#fdca00' },
+                        { label: 'Active Sessions', val: tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length, icon: Users, accent: '#05503c' },
+                        { label: 'Pending Items', val: tables.reduce((sum, t) => sum + (Number(t.pending_count) || 0), 0), icon: ShoppingBag, accent: '#ef4444' },
+                      ].map((stat, i) => {
+                        const Icon = stat.icon;
+                        return (
+                          <div key={i} className="af glass-card-admin" style={{ borderRadius: 22, position: 'relative', overflow: 'hidden', padding: '1rem' }}>
+                            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: stat.accent, borderRadius: '22px 22px 0 0' }} />
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                              <div style={{
+                                width: 32, height: 32, borderRadius: 10,
+                                background: `${stat.accent}15`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              }}>
+                                <Icon size={16} style={{ color: stat.accent }} />
+                              </div>
+                              <div>
+                                <p style={{ fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.4)', marginBottom: '0.1rem' }}>{stat.label}</p>
+                                <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.2rem', color: '#05503c' }}>{stat.val}</p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length === 0 ? (
+                      <div className="admin-empty-state" style={{ padding: '5rem 2rem' }}>
+                        <DollarSign size={48} strokeWidth={1} style={{ color: 'rgba(5,80,60,0.15)', marginBottom: '1.5rem' }} />
+                        <p style={{ fontFamily: 'var(--font-bricolage)', fontSize: '1.2rem', color: 'rgba(5,80,60,0.3)' }}>No active sessions to bill</p>
+                        <p style={{ fontSize: '0.9rem', color: 'rgba(5,80,60,0.2)', marginTop: '0.5rem' }}>All tables are currently available</p>
+                      </div>
+                    ) : (
+                      <div className="admin-card-grid">
+                        {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).map(table => {
+                          const isExpanded = expandedTable === table.id;
+                          const orders = sessionOrders[table.session_id] || [];
+                          const subtotal = (orders.reduce((sum: number, o: any) => sum + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0)) || Number(table.subtotal) || 0;
+                          
+                          // Official rates from Ethiopia (15% VAT, 10% Svc)
+                          const vat = subtotal * 0.15;
+                          const service = subtotal * 0.10;
+                          const total = subtotal + vat + service;
+                          const pm = paymentMethod[table.session_id] || 'cash';
+
+                          return (
+                            <div key={table.id} className="af glass-card-admin" style={{
+                              borderRadius: 24, overflow: 'hidden', position: 'relative',
+                              border: '1.5px solid rgba(253,202,0,0.4)',
+                              boxShadow: '0 12px 40px rgba(5,80,60,0.08)',
+                            }}>
+                              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, background: 'linear-gradient(90deg, #fdca00, #ffd845)' }} />
+
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                                <div>
+                                  <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '2.2rem', color: '#05503c', lineHeight: 1 }}>T{table.table_number}</p>
+                                  <p style={{ fontSize: '0.65rem', letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.4)', marginTop: '0.4rem', fontWeight: 700 }}>
+                                    Active for {getSessionDuration(table.opened_at)}
+                                  </p>
+                                </div>
+                                <div style={{ textAlign: 'right' }}>
+                                  <p style={{ fontSize: '0.65rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.4)', marginBottom: '0.2rem' }}>Total Due</p>
+                                  <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.8rem', color: '#fdca00', lineHeight: 1 }}>{total.toFixed(0)} <span style={{ fontSize: '0.9rem' }}>ETB</span></p>
+                                </div>
+                              </div>
+
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                                <button
+                                  onClick={() => handleExpandTable(table)}
+                                  style={{
+                                    width: '100%', padding: '0.75rem', borderRadius: 12,
+                                    border: '1px solid rgba(5,80,60,0.08)',
+                                    background: 'rgba(5,80,60,0.03)', color: '#05503c',
+                                    cursor: 'pointer', fontFamily: 'var(--font-bricolage)',
+                                    fontWeight: 700, fontSize: '0.85rem',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+                                  }}
+                                >
+                                  {isExpanded ? 'Hide Items' : `View ${table.order_count || 0} Orders`}
+                                  <ArrowRight size={14} style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
+                                </button>
+
+                                {isExpanded && (
+                                  <div style={{ maxHeight: 300, overflowY: 'auto', padding: '0.5rem', background: 'rgba(5,80,60,0.02)', borderRadius: 12, border: '1px solid rgba(5,80,60,0.05)' }} className="scrollbar-hide">
+                                    {orders.length === 0 ? (
+                                      <p style={{ textAlign: 'center', padding: '1rem', color: 'rgba(5,80,60,0.3)', fontSize: '0.8rem' }}>Loading items...</p>
+                                    ) : (
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                        {orders.map((order: any) => (
+                                          <div key={order.id} style={{ padding: '0.6rem', borderBottom: '1px solid rgba(5,80,60,0.05)' }}>
+                                            {order.items.map((item: any, idx: number) => (
+                                              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                                                <span style={{ color: '#05503c' }}>{item.quantity}× {item.name}</span>
+                                                <span style={{ fontWeight: 600 }}>{(item.quantity * item.unit_price).toFixed(0)}</span>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ))}
+                                        <div style={{ padding: '0.6rem', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'rgba(5,80,60,0.5)' }}>
+                                            <span>Subtotal</span>
+                                            <span>{subtotal.toFixed(0)}</span>
+                                          </div>
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'rgba(5,80,60,0.5)' }}>
+                                            <span>VAT (15%) + Service (10%)</span>
+                                            <span>{(vat + service).toFixed(0)}</span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div style={{ marginBottom: '1.25rem' }}>
+                                <p style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(5,80,60,0.4)', marginBottom: '0.6rem' }}>Select Payment Method</p>
+                                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                  {(['cash', 'card', 'mobile'] as const).map(m => (
+                                    <button
+                                      key={m}
+                                      onClick={() => setPaymentMethod(prev => ({ ...prev, [table.session_id]: m }))}
+                                      style={{
+                                        flex: 1, padding: '0.65rem 0.25rem', borderRadius: 12, border: 'none',
+                                        cursor: 'pointer', fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.75rem',
+                                        textTransform: 'capitalize',
+                                        background: pm === m ? '#05503c' : 'rgba(5,80,60,0.05)',
+                                        color: pm === m ? '#fff' : 'rgba(5,80,60,0.45)',
+                                        transition: 'all 0.2s ease',
+                                        boxShadow: pm === m ? '0 4px 12px rgba(5,80,60,0.2)' : 'none',
+                                      }}
+                                    >
+                                      {m === 'mobile' ? 'Mobile' : m}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                                <button
+                                  onClick={() => handlePayment(table.session_id, pm)}
+                                  className="shimmer-btn"
+                                  style={{
+                                    flex: 1, padding: '1rem', borderRadius: 16, border: 'none',
+                                    background: 'linear-gradient(135deg, #05503c 0%, #0a6b51 100%)',
+                                    color: '#ffffff', cursor: 'pointer',
+                                    fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.9rem',
+                                    boxShadow: '0 8px 24px rgba(5,80,60,0.2)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem',
+                                  }}
+                                >
+                                  <DollarSign size={18} /> Confirm Payment
+                                </button>
+                                <button
+                                  onClick={() => handleCancelSession(table.session_id, table.table_number)}
+                                  title="Clear Table / Cancel Session"
+                                  style={{
+                                    width: 52, height: 52, borderRadius: 16, border: '1px solid rgba(239,68,68,0.2)',
+                                    background: 'rgba(239,68,68,0.05)', color: '#ef4444',
+                                    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(239,68,68,0.1)'}
+                                  onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'rgba(239,68,68,0.05)'}
+                                >
+                                  <X size={20} />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -2052,11 +2464,9 @@ export default function AdminDashboard() {
                     outline: 'none', cursor: 'pointer',
                   }}
                 >
-                  <option value="appetizers">Appetizers</option>
-                  <option value="mains">Mains</option>
-                  <option value="sides">Sides</option>
-                  <option value="desserts">Desserts</option>
-                  <option value="beverages">Beverages</option>
+                  {MENU_CATEGORIES.map((cat: any) => (
+                    <option key={cat.id} value={cat.id}>{cat.label}</option>
+                  ))}
                 </select>
               </div>
 
@@ -2098,6 +2508,29 @@ export default function AdminDashboard() {
                   onChange={e => setMenuForm({ ...menuForm, price: e.target.value })}
                   placeholder="0.00"
                   step="0.01"
+                  style={{
+                    width: '100%', padding: '0.75rem 1rem',
+                    borderRadius: 12, border: '1px solid rgba(5,80,60,0.1)',
+                    fontFamily: 'var(--font-instrument)', fontSize: '0.95rem',
+                    outline: 'none',
+                  }}
+                />
+              </div>
+
+              {/* Stock Quantity */}
+              <div>
+                <label style={{
+                  display: 'block', marginBottom: '0.5rem',
+                  fontFamily: 'var(--font-bricolage)', fontWeight: 700,
+                  fontSize: '0.85rem', color: '#05503c',
+                }}>
+                  Stock Quantity *
+                </label>
+                <input
+                  type="number"
+                  value={menuForm.stock_quantity}
+                  onChange={e => setMenuForm({ ...menuForm, stock_quantity: e.target.value })}
+                  placeholder="999"
                   style={{
                     width: '100%', padding: '0.75rem 1rem',
                     borderRadius: 12, border: '1px solid rgba(5,80,60,0.1)',
@@ -2238,16 +2671,16 @@ export default function AdminDashboard() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 {/* Available Toggle */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <div 
+                  <div
                     onClick={() => setMenuForm({ ...menuForm, is_available: !menuForm.is_available })}
-                    style={{ 
-                      width: 44, height: 24, borderRadius: 12, 
+                    style={{
+                      width: 44, height: 24, borderRadius: 12,
                       background: menuForm.is_available ? '#fdca00' : 'rgba(5,80,60,0.1)',
                       position: 'relative', cursor: 'pointer', transition: 'all 0.3s ease',
                       border: '1px solid rgba(5,80,60,0.05)'
                     }}
                   >
-                    <div style={{ 
+                    <div style={{
                       position: 'absolute', top: 2, left: menuForm.is_available ? 22 : 2,
                       width: 18, height: 18, borderRadius: '50%', background: '#fff',
                       boxShadow: '0 2px 4px rgba(0,0,0,0.1)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
@@ -2265,16 +2698,16 @@ export default function AdminDashboard() {
 
                 {/* Signature Toggle */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <div 
+                  <div
                     onClick={() => setMenuForm({ ...menuForm, is_signature: !menuForm.is_signature })}
-                    style={{ 
-                      width: 44, height: 24, borderRadius: 12, 
+                    style={{
+                      width: 44, height: 24, borderRadius: 12,
                       background: menuForm.is_signature ? '#05503c' : 'rgba(5,80,60,0.1)',
                       position: 'relative', cursor: 'pointer', transition: 'all 0.3s ease',
                       border: '1px solid rgba(5,80,60,0.05)'
                     }}
                   >
-                    <div style={{ 
+                    <div style={{
                       position: 'absolute', top: 2, left: menuForm.is_signature ? 22 : 2,
                       width: 18, height: 18, borderRadius: '50%', background: '#fff',
                       boxShadow: '0 2px 4px rgba(0,0,0,0.1)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
