@@ -34,10 +34,12 @@ function MenuContent() {
     updateQuantity,
     clearCart,
     getCartTotal,
+    clearSession,
   } = useTabStore();
 
   const categories = [
     { id: 'all', label: 'All Items' },
+    { id: 'signature', label: '✨ Signature' },
     { id: 'beverages', label: 'Coffee & Drinks' },
     { id: 'appetizers', label: 'Appetizers' },
     { id: 'mains', label: 'Mains' },
@@ -125,7 +127,11 @@ function MenuContent() {
   };
 
   const filteredItems = menuItems.filter(item => {
-    const matchesCategory = selectedCategory === 'all' || item.category === selectedCategory;
+    const matchesCategory = selectedCategory === 'all' 
+      ? true 
+      : selectedCategory === 'signature' 
+        ? item.is_signature 
+        : item.category === selectedCategory;
     const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesCategory && matchesSearch && item.is_available;
   });
@@ -208,9 +214,26 @@ function MenuContent() {
             </Link>
             <div style={{ width: 1, height: 24, background: 'rgba(5,80,60,0.1)' }} />
             {sessionId ? (
-              <p style={{ fontSize: '0.62rem', letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: 'var(--font-bricolage)', fontWeight: 700, color: '#fdca00' }}>
-                Table {useTabStore.getState().tableNumber}
-              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <p style={{ fontSize: '0.62rem', letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: 'var(--font-bricolage)', fontWeight: 700, color: '#fdca00' }}>
+                  Table {useTabStore.getState().tableNumber}
+                </p>
+                <button 
+                  onClick={() => {
+                    if (confirm('Leave this table? Your current cart will be cleared.')) {
+                      clearSession();
+                      window.location.href = '/menu';
+                    }
+                  }}
+                  style={{ 
+                    padding: '0.35rem 0.6rem', borderRadius: 8, border: '1px solid rgba(239,68,68,0.2)',
+                    background: 'rgba(239,68,68,0.05)', color: '#ef4444', fontSize: '0.6rem',
+                    fontWeight: 700, cursor: 'pointer', textTransform: 'uppercase'
+                  }}
+                >
+                  Leave
+                </button>
+              </div>
             ) : (
               <button 
                 onClick={() => setShowTableModal(true)}
@@ -259,7 +282,7 @@ function MenuContent() {
 
           {/* Category pills */}
           <div className="scrollbar-hide" style={{ display: 'flex', gap: '0.5rem', overflowX: 'auto', paddingBottom: '0.25rem', justifyContent: 'center' }}>
-            {categories.map(cat => (
+            {categories.map((cat: any) => (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}

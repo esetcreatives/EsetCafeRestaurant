@@ -36,11 +36,14 @@ export default function Home() {
         if (data && !error && Array.isArray(data)) {
           // Get top 3 available items, prioritize items with images
           const available = data.filter((item: any) => item.is_available);
-          const withImages = available.filter((item: any) => item.image_url);
-          const featured = withImages.length >= 3 
-            ? withImages.slice(0, 3)
-            : [...withImages, ...available.filter((item: any) => !item.image_url)].slice(0, 3);
-          setFeaturedDishes(featured);
+          const signature = available.filter((item: any) => item.is_signature);
+          
+          // If we have signature dishes, use them. Otherwise fallback to original logic
+          const featured = signature.length > 0 
+            ? signature.slice(0, 3)
+            : available.filter((item: any) => item.image_url).slice(0, 3);
+          
+          setFeaturedDishes(featured.length > 0 ? featured : available.slice(0, 3));
         }
       } catch (error) {
         console.error('Failed to fetch featured items:', error);

@@ -324,8 +324,27 @@ export const adminAPI = {
     const { data, error } = await supabase.from('payments').select('*').gte('paid_at', today);
     if (error) return { error: error.message };
 
-    const total = data?.reduce((sum: number, p: any) => sum + Number(p.total), 0) || 0;
-    return { data: { total_sales: total, count: data?.length || 0, items: data || [] } };
+    const totals = data?.reduce((acc: any, p: any) => {
+      acc.subtotal += Number(p.subtotal || 0);
+      acc.vat += Number(p.vat || 0);
+      acc.service += Number(p.service_charge || 0);
+      acc.total += Number(p.total || 0);
+      return acc;
+    }, { subtotal: 0, vat: 0, service: 0, total: 0 }) || { subtotal: 0, vat: 0, service: 0, total: 0 };
+
+    return { 
+      data: { 
+        total_sales: totals.total, 
+        count: data?.length || 0, 
+        items: data || [],
+        revenue: {
+          total_subtotal: totals.subtotal,
+          total_vat: totals.vat,
+          total_service: totals.service,
+          total_revenue: totals.total
+        }
+      } 
+    };
   },
   getAdminUsers: () =>
     handleSupabase(supabase.from('admin_users').select('*').then((res: any) => {

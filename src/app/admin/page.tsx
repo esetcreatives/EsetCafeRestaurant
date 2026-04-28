@@ -95,6 +95,7 @@ export default function AdminDashboard() {
     price: '',
     image_url: '',
     is_available: true,
+    is_signature: false,
   });
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -300,7 +301,17 @@ export default function AdminDashboard() {
   };
 
   const handlePayment = async (sessionId: number, method: string = 'cash') => {
-    if (!confirm(`Confirm ${method} payment for this session?`)) return;
+    // Calculate totals for confirmation
+    const session = tables.find(t => t.session_id === sessionId);
+    if (!session) return;
+    
+    const sub = Number(session.subtotal) || 0;
+    const v = sub * 0.15;
+    const s = sub * 0.10;
+    const tot = sub + v + s;
+
+    if (!confirm(`Confirm ${method} payment?\n\nSubtotal: ${sub.toFixed(0)} ETB\nVAT (15%): ${v.toFixed(0)} ETB\nService (10%): ${s.toFixed(0)} ETB\nTotal: ${tot.toFixed(0)} ETB`)) return;
+    
     const { data, error } = await actions.confirmPaymentAction(sessionId, method);
     if (!error && data) {
       setExpandedTable(null);
@@ -354,6 +365,7 @@ export default function AdminDashboard() {
         price: item.price.toString(),
         image_url: item.image_url || '',
         is_available: item.is_available,
+        is_signature: item.is_signature || false,
       });
       setImagePreview(item.image_url || null);
     } else {
@@ -366,6 +378,7 @@ export default function AdminDashboard() {
         price: '',
         image_url: '',
         is_available: true,
+        is_signature: false,
       });
       setImagePreview(null);
     }
@@ -1665,15 +1678,24 @@ export default function AdminDashboard() {
                             <button
                               onClick={() => handleToggleAvailability(item.id, item.is_available)}
                               style={{
-                                padding: '0.5rem 1.1rem', borderRadius: 10, cursor: 'pointer',
-                                fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.72rem',
-                                letterSpacing: '0.06em', textTransform: 'uppercase',
-                                background: item.is_available ? 'rgba(5,80,60,0.08)' : 'rgba(239,68,68,0.1)',
-                                color: item.is_available ? '#05503c' : '#ef4444',
-                                border: `1px solid ${item.is_available ? 'rgba(5,80,60,0.12)' : 'rgba(239,68,68,0.18)'}`,
-                                transition: 'all 0.2s ease',
+                                display: 'flex', alignItems: 'center', gap: '0.5rem',
+                                padding: '0.4rem 0.8rem', borderRadius: '9999px', cursor: 'pointer',
+                                fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.65rem',
+                                letterSpacing: '0.04em', textTransform: 'uppercase',
+                                background: item.is_available ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                                color: item.is_available ? '#22c55e' : '#ef4444',
+                                border: `1px solid ${item.is_available ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
+                                transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                                position: 'relative',
+                                minWidth: '95px',
+                                justifyContent: 'center'
                               }}
                             >
+                              <div style={{
+                                width: '12px', height: '12px', borderRadius: '50%',
+                                background: item.is_available ? '#22c55e' : '#ef4444',
+                                boxShadow: `0 0 8px ${item.is_available ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`
+                              }} />
                               {item.is_available ? 'In Stock' : 'Sold Out'}
                             </button>
 
@@ -2076,9 +2098,14 @@ export default function AdminDashboard() {
                     <img
                       src={imagePreview}
                       alt="Preview"
+                      key={imagePreview}
                       style={{
                         width: '100%', height: 200, objectFit: 'cover',
                         borderRadius: 12, border: '1px solid rgba(5,80,60,0.1)',
+                      }}
+                      onError={(e) => {
+                        console.error('Image preview failed to load:', imagePreview);
+                        setImagePreview(null);
                       }}
                     />
                     <button
@@ -2138,24 +2165,60 @@ export default function AdminDashboard() {
                 )}
               </div>
 
-              {/* Available Toggle */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <input
-                  type="checkbox"
-                  id="is_available"
-                  checked={menuForm.is_available}
-                  onChange={e => setMenuForm({ ...menuForm, is_available: e.target.checked })}
-                  style={{ width: 18, height: 18, cursor: 'pointer' }}
-                />
-                <label
-                  htmlFor="is_available"
-                  style={{
-                    fontFamily: 'var(--font-bricolage)', fontWeight: 700,
-                    fontSize: '0.85rem', color: '#05503c', cursor: 'pointer',
-                  }}
-                >
-                  Available for ordering
-                </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                {/* Available Toggle */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div 
+                    onClick={() => setMenuForm({ ...menuForm, is_available: !menuForm.is_available })}
+                    style={{ 
+                      width: 44, height: 24, borderRadius: 12, 
+                      background: menuForm.is_available ? '#fdca00' : 'rgba(5,80,60,0.1)',
+                      position: 'relative', cursor: 'pointer', transition: 'all 0.3s ease',
+                      border: '1px solid rgba(5,80,60,0.05)'
+                    }}
+                  >
+                    <div style={{ 
+                      position: 'absolute', top: 2, left: menuForm.is_available ? 22 : 2,
+                      width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.1)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                    }} />
+                  </div>
+                  <label
+                    style={{
+                      fontFamily: 'var(--font-bricolage)', fontWeight: 700,
+                      fontSize: '0.85rem', color: '#05503c', cursor: 'pointer',
+                    }}
+                  >
+                    Available for ordering
+                  </label>
+                </div>
+
+                {/* Signature Toggle */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <div 
+                    onClick={() => setMenuForm({ ...menuForm, is_signature: !menuForm.is_signature })}
+                    style={{ 
+                      width: 44, height: 24, borderRadius: 12, 
+                      background: menuForm.is_signature ? '#05503c' : 'rgba(5,80,60,0.1)',
+                      position: 'relative', cursor: 'pointer', transition: 'all 0.3s ease',
+                      border: '1px solid rgba(5,80,60,0.05)'
+                    }}
+                  >
+                    <div style={{ 
+                      position: 'absolute', top: 2, left: menuForm.is_signature ? 22 : 2,
+                      width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.1)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                    }} />
+                  </div>
+                  <label
+                    style={{
+                      fontFamily: 'var(--font-bricolage)', fontWeight: 700,
+                      fontSize: '0.85rem', color: '#05503c', cursor: 'pointer',
+                    }}
+                  >
+                    Signature Dish
+                  </label>
+                </div>
               </div>
             </div>
 
