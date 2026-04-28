@@ -20,6 +20,7 @@ export interface LoginResponse {
 
 export interface SessionResponse {
   session_id: number;
+  session_token: string;
   table_id: number;
   table_number: number;
   message: string;
@@ -155,7 +156,7 @@ export const sessionAPI = {
       // 2. Check for existing open session
       const { data: existingSession } = await supabase
         .from('sessions')
-        .select('id')
+        .select('id, token')
         .eq('table_id', table.id)
         .eq('status', 'open')
         .single();
@@ -164,6 +165,7 @@ export const sessionAPI = {
         return {
           data: {
             session_id: existingSession.id,
+            session_token: existingSession.token,
             table_id: table.id,
             table_number: table.number,
             message: 'Session resumed'
@@ -171,10 +173,11 @@ export const sessionAPI = {
         };
       }
 
-      // 3. Create new session
+      // 3. Create new session with secure token
+      const sessionToken = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
       const { data: newSession, error: sessionError } = await supabase
         .from('sessions')
-        .insert({ table_id: table.id, status: 'open' })
+        .insert({ table_id: table.id, status: 'open', token: sessionToken })
         .select()
         .single();
 
@@ -186,6 +189,7 @@ export const sessionAPI = {
       return {
         data: {
           session_id: newSession.id,
+          session_token: sessionToken,
           table_id: table.id,
           table_number: table.number,
           message: 'Session created'

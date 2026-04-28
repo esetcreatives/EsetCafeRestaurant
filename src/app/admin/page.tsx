@@ -329,7 +329,7 @@ export default function AdminDashboard() {
   };
 
   const handleStatusChange = async (orderId: number, status: string) => {
-    const { error } = await actions.updateOrderStatusAction(orderId, status);
+    const { error } = await actions.updateOrderStatus(orderId, status);
     if (!error) updateOrderStatus(orderId, status);
     else alert('Failed to update status: ' + error);
   };
@@ -2285,7 +2285,7 @@ export default function AdminDashboard() {
                                         {admin.username}
                                       </div>
                                     </td>
-                                    <td style={{ padding: '1rem 1.5rem' }}>
+                                    <td style={{ padding: '1rem 1.5rem' }} data-label="Role">
                                       <div style={{
                                         display: 'inline-block',
                                         padding: '0.3rem 0.7rem', borderRadius: 8,
@@ -2297,7 +2297,7 @@ export default function AdminDashboard() {
                                         {style.label}
                                       </div>
                                     </td>
-                                    <td style={{ padding: '1rem 1.5rem', textAlign: 'right' }}>
+                                    <td style={{ padding: '1rem 1.5rem', textAlign: 'right' }} data-label="Actions">
                                       <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
                                         <button
                                           onClick={() => handleOpenAdminModal(admin)}
@@ -2388,11 +2388,13 @@ export default function AdminDashboard() {
         >
           <div
             style={{
-              background: '#ffffff', borderRadius: 24,
+              background: '#ffffff', 
+              borderRadius: '24px',
               maxWidth: 600, width: '100%',
               maxHeight: '90vh', overflowY: 'auto',
               boxShadow: '0 20px 60px rgba(5,80,60,0.2)',
             }}
+            className="admin-modal-container"
             onClick={e => e.stopPropagation()}
           >
             {/* Modal Header */}
@@ -2772,11 +2774,12 @@ export default function AdminDashboard() {
         >
           <div
             style={{
-              background: '#ffffff', borderRadius: 24,
+              background: '#ffffff', borderRadius: '24px',
               maxWidth: 500, width: '100%',
               maxHeight: '90vh', overflowY: 'auto',
               boxShadow: '0 20px 60px rgba(5,80,60,0.2)',
             }}
+            className="admin-modal-container"
             onClick={e => e.stopPropagation()}
           >
             {/* Modal Header */}

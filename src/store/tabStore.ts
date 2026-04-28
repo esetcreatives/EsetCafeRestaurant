@@ -31,12 +31,13 @@ interface TabState {
   tableNumber: number | null;
   token: string | null;
   sessionId: number | null;
+  sessionToken: string | null;
   cartItems: CartItem[];
   confirmedOrders: Order[];
   splitSelections: Set<number>;
   
   // Actions
-  setSession: (tableNumber: number, tableId: number, token: string, sessionId: number) => void;
+  setSession: (tableNumber: number, tableId: number, token: string, sessionId: number, sessionToken: string) => void;
   addToCart: (item: MenuItem) => void;
   removeFromCart: (itemId: number) => void;
   updateQuantity: (itemId: number, quantity: number) => void;
@@ -56,12 +57,13 @@ export const useTabStore = create<TabState>()(
       tableNumber: null,
       token: null,
       sessionId: null,
+      sessionToken: null,
       cartItems: [],
       confirmedOrders: [],
       splitSelections: new Set(),
       
-      setSession: (tableNumber, tableId, token, sessionId) =>
-        set({ tableNumber, tableId, token, sessionId }),
+      setSession: (tableNumber, tableId, token, sessionId, sessionToken) =>
+        set({ tableNumber, tableId, token, sessionId, sessionToken }),
       
       addToCart: (item) =>
         set((state) => {
@@ -126,6 +128,7 @@ export const useTabStore = create<TabState>()(
           tableNumber: null,
           token: null,
           sessionId: null,
+          sessionToken: null,
           cartItems: [],
           confirmedOrders: [],
           splitSelections: new Set(),
@@ -138,6 +141,7 @@ export const useTabStore = create<TabState>()(
         tableNumber: state.tableNumber,
         token: state.token,
         sessionId: state.sessionId,
+        sessionToken: state.sessionToken,
         cartItems: state.cartItems,
       }),
     }

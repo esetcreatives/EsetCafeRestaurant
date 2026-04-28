@@ -28,6 +28,7 @@ function MenuContent() {
 
   const {
     sessionId,
+    sessionToken,
     tableNumber,
     cartItems,
     setSession,
@@ -93,7 +94,7 @@ function MenuContent() {
       // QR Code mode - auto join session
       sessionAPI.create(parseInt(tableNumber), token).then(({ data, error }) => {
         if (data && !error) {
-          setSession(data.table_number, data.table_id, token, data.session_id);
+          setSession(data.table_number, data.table_id, token, data.session_id, data.session_token);
           if (data.message === 'Session created') {
             clearCart();
           }
@@ -140,8 +141,8 @@ function MenuContent() {
     try {
       const result = await startManualSessionAction(tableNum);
       if (result.success && result.data) {
-        const { session_id, table_id, token, table_number } = result.data;
-        setSession(table_number, table_id, token, session_id);
+        const { session_id, table_id, token, table_number, session_token } = result.data;
+        setSession(table_number, table_id, token, session_id, session_token);
         setShowTableModal(false);
         
         // If they were trying to add an item, add it now
@@ -194,7 +195,7 @@ function MenuContent() {
       }
       
       const items = cartItems.map(item => ({ menu_item_id: item.id, quantity: item.quantity }));
-      const result = await placeOrderAction(sessionId, items);
+      const result = await placeOrderAction(sessionId, items, '', sessionToken || '');
       
       if (result.success) {
         alert('Order placed successfully! Your food will be prepared shortly.');

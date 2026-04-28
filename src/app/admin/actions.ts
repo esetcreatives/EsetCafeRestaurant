@@ -2,6 +2,33 @@
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { revalidatePath } from 'next/cache';
+import { cookies } from 'next/headers';
+import { createClient } from '@supabase/supabase-js';
+
+/**
+ * Helper to verify that the request is coming from an authorized admin.
+ * We check the user's role from the JWT stored in cookies.
+ */
+async function verifyAdmin(allowedRoles: string[] = ['admin', 'super_admin', 'manager', 'kitchen']) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  
+  // This client will automatically use cookies if we pass them
+  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  
+  const { data: { user }, error } = await supabase.auth.getUser();
+  
+  if (error || !user) {
+    throw new Error('Unauthorized: No active session');
+  }
+
+  const role = user.user_metadata?.role || 'admin';
+  if (!allowedRoles.includes(role)) {
+    throw new Error(`Unauthorized: Role ${role} is not allowed to perform this action`);
+  }
+
+  return user;
+}
 
 /**
  * These actions use the Service Role Key to bypass RLS.
@@ -10,6 +37,7 @@ import { revalidatePath } from 'next/cache';
 
 export async function toggleMenuItemAvailability(id: number, isAvailable: boolean) {
   try {
+    await verifyAdmin();
     const { error } = await supabaseAdmin
       .from('menu_items')
       .update({ is_available: isAvailable })
@@ -26,6 +54,7 @@ export async function toggleMenuItemAvailability(id: number, isAvailable: boolea
 
 export async function deleteMenuItem(id: number) {
   try {
+    await verifyAdmin(['admin', 'super_admin', 'manager']);
     const { error } = await supabaseAdmin
       .from('menu_items')
       .delete()
@@ -42,6 +71,7 @@ export async function deleteMenuItem(id: number) {
 
 export async function saveMenuItem(itemData: any, id?: number) {
   try {
+    await verifyAdmin(['admin', 'super_admin', 'manager']);
     let result;
     if (id) {
       result = await supabaseAdmin
@@ -193,7 +223,7 @@ export async function startManualSessionAction(tableNumber: number) {
 
     const { data: existingSession } = await supabaseAdmin
       .from('sessions')
-      .select('id, status')
+      .select('id, status, token')
       .eq('table_id', table.id)
       .eq('status', 'open')
       .order('created_at', { ascending: false })
@@ -204,6 +234,7 @@ export async function startManualSessionAction(tableNumber: number) {
       return { 
         data: { 
           session_id: existingSession.id, 
+          session_token: existingSession.token,
           table_id: table.id, 
           table_number: tableNumber, 
           token: table.token,
@@ -213,10 +244,11 @@ export async function startManualSessionAction(tableNumber: number) {
       };
     }
 
-    // 3. Create new session
+    // 3. Create new session with secure token
+    const sessionToken = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
     const { data: newSession, error: createError } = await supabaseAdmin
       .from('sessions')
-      .insert({ table_id: table.id, status: 'open' })
+      .insert({ table_id: table.id, status: 'open', token: sessionToken })
       .select()
       .single();
 
@@ -231,6 +263,7 @@ export async function startManualSessionAction(tableNumber: number) {
      return { 
        data: { 
          session_id: newSession.id, 
+         session_token: sessionToken,
          table_id: table.id, 
          table_number: tableNumber, 
          token: table.token,
@@ -244,10 +277,11 @@ export async function startManualSessionAction(tableNumber: number) {
    }
  }
  
- export async function placeOrderAction(sessionId: number, items: any[], notes?: string) {
+ export async function placeOrderAction(sessionId: number, items: any[], notes?: string, sessionToken: string = '') {
   try {
     const { data, error } = await supabaseAdmin.rpc('place_order', {
       p_session_id: sessionId,
+      p_session_token: sessionToken,
       p_items: items,
       p_notes: notes || ''
     });
@@ -268,8 +302,9 @@ export async function startManualSessionAction(tableNumber: number) {
   }
 }
 
-export async function updateOrderStatusAction(orderId: number, status: string) {
+export async function updateOrderStatus(orderId: number, status: string) {
   try {
+    await verifyAdmin();
     const { error } = await supabaseAdmin
       .from('orders')
       .update({ status })
@@ -286,6 +321,7 @@ export async function updateOrderStatusAction(orderId: number, status: string) {
 
 export async function confirmPaymentAction(sessionId: number, paymentMethod: string = 'cash') {
   try {
+    await verifyAdmin();
     // 1. Get official totals from DB first
     const { data: billData, error: billError } = await supabaseAdmin.rpc('get_session_bill', {
       p_session_id: sessionId
@@ -319,6 +355,7 @@ export async function confirmPaymentAction(sessionId: number, paymentMethod: str
 
 export async function cancelSessionAction(sessionId: number) {
   try {
+    await verifyAdmin();
     const { data: session, error: fetchError } = await supabaseAdmin
       .from('sessions')
       .select('table_id')
@@ -354,6 +391,7 @@ export async function cancelSessionAction(sessionId: number) {
 
 export async function resetDashboardData() {
   try {
+    await verifyAdmin(['super_admin', 'manager']);
     // The order is important due to potential foreign key constraints
     // 1. Delete all payments
     const { error: pError } = await supabaseAdmin.from('payments').delete().neq('id', -1);
