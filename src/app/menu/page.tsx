@@ -125,7 +125,7 @@ function MenuContent() {
     // 1. Initial fetch
     const fetchOrders = async () => {
       const { data } = await orderAPI.getSessionOrders(sessionId);
-      if (data) setActiveOrders(data);
+      if (data && Array.isArray(data)) setActiveOrders(data);
     };
     fetchOrders();
 

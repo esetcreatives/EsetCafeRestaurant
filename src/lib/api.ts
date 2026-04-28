@@ -255,7 +255,7 @@ export const orderAPI = {
       return res;
     }));
   },
-  getSessionOrders: (sessionId: number) =>
+  getSessionOrders: (sessionId: number): Promise<ApiResponse<any[]>> =>
     handleSupabase(
       supabase.from('orders')
         .select('*, order_items(*, menu_items(name))')
