@@ -36,6 +36,7 @@ function MenuContent() {
   const [taxSettings, setTaxSettings] = useState({ vat_rate: 0.15, service_charge_rate: 0.10 });
   const [activeOrders, setActiveOrders] = useState<any[]>([]);
   const [showTracker, setShowTracker] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<any | null>(null);
 
   const {
     sessionId,
@@ -213,6 +214,8 @@ function MenuContent() {
           setPendingItem(null);
           addToCart({ ...item, price: typeof item.price === 'string' ? parseFloat(item.price as any) : item.price });
           gsap.fromTo('.cart-btn', { scale: 1 }, { scale: 1.1, duration: 0.15, yoyo: true, repeat: 1 });
+          // Open the cart modal immediately so user doesn't have to click the button
+          setShowCart(true);
         }
       } else {
         setToast({ message: result.error || 'Failed to find table.', type: 'error' });
@@ -337,10 +340,29 @@ function MenuContent() {
             </Link>
             <div style={{ width: 1, height: 24, background: 'rgba(5,80,60,0.1)' }} />
             {sessionId ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <p style={{ fontSize: '0.62rem', letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: 'var(--font-bricolage)', fontWeight: 700, color: '#fdca00' }}>
-                  Table {tableNumber}
-                </p>
+              <div style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '0.6rem',
+                background: 'rgba(253,202,0,0.08)',
+                border: '1px solid rgba(253,202,0,0.2)',
+                borderRadius: '10px',
+                padding: '0.35rem 0.7rem',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <Utensils size={13} color="#fdca00" />
+                  <span style={{ 
+                    fontSize: '0.65rem', 
+                    fontFamily: 'var(--font-bricolage)', 
+                    fontWeight: 800, 
+                    color: '#05503c',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em'
+                  }}>
+                    Table {tableNumber}
+                  </span>
+                </div>
+                <div style={{ width: 1, height: 12, background: 'rgba(5,80,60,0.1)' }} />
                 <button 
                   onClick={() => {
                     if (confirm('Leave this table? Your current cart will be cleared.')) {
@@ -348,9 +370,22 @@ function MenuContent() {
                       window.location.href = '/menu';
                     }
                   }}
-                  style={{ background: 'none', border: 'none', color: 'rgba(5,80,60,0.4)', fontSize: '0.6rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', cursor: 'pointer', padding: '0.2rem' }}
+                  style={{ 
+                    background: 'none', 
+                    border: 'none', 
+                    color: 'rgba(5,80,60,0.4)', 
+                    fontSize: '0.6rem', 
+                    fontWeight: 800, 
+                    textTransform: 'uppercase', 
+                    letterSpacing: '0.05em', 
+                    cursor: 'pointer',
+                    padding: '0',
+                    transition: 'color 0.2s'
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
+                  onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(5,80,60,0.4)'}
                 >
-                  (Leave)
+                  Leave
                 </button>
               </div>
             ) : (
@@ -486,11 +521,13 @@ function MenuContent() {
               <div
                 key={item.id}
                 className="menu-card"
+                onClick={() => setSelectedItem(item)}
                 style={{
                   background: '#ffffff', borderRadius: 28, overflow: 'hidden',
                   border: '1px solid rgba(5,80,60,0.06)',
                   boxShadow: '0 4px 30px rgba(5,80,60,0.04)',
                   transition: 'transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                  cursor: 'pointer'
                 }}
               >
                 <div style={{ position: 'relative', height: 220, overflow: 'hidden' }}>
@@ -894,6 +931,122 @@ function MenuContent() {
           `}</style>
           {/* Auto-dismiss after 4s */}
           {setTimeout(() => setToast(null), 4000) && null}
+        </div>
+      )}
+
+      {/* Item Details Modal */}
+      {selectedItem && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 150,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem',
+          animation: 'fadeIn 0.3s ease'
+        }}>
+          <div 
+            onClick={() => setSelectedItem(null)}
+            style={{ position: 'absolute', inset: 0, background: 'rgba(5,80,60,0.4)', backdropFilter: 'blur(10px)' }} 
+          />
+          <div style={{
+            position: 'relative', width: '100%', maxWidth: '600px',
+            background: '#ffffff', borderRadius: '2.5rem', overflow: 'hidden',
+            boxShadow: '0 25px 80px rgba(0,0,0,0.2)',
+            animation: 'modalScale 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+            maxHeight: '90vh', display: 'flex', flexDirection: 'column'
+          }}>
+            <button 
+              onClick={() => setSelectedItem(null)}
+              style={{
+                position: 'absolute', top: '1.5rem', right: '1.5rem', zIndex: 10,
+                width: '40px', height: '40px', borderRadius: '50%', background: 'rgba(255,255,255,0.9)',
+                border: '1px solid rgba(5,80,60,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', color: '#05503c', transition: 'all 0.2s'
+              }}
+            >
+              <X size={20} />
+            </button>
+
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+              <div style={{ position: 'relative', height: '300px', width: '100%' }}>
+                {selectedItem.image_url ? (
+                  <img src={selectedItem.image_url} alt={selectedItem.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                ) : (
+                  <div style={{ width: '100%', height: '100%', background: 'rgba(5,80,60,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Coffee size={64} style={{ color: 'rgba(5,80,60,0.1)' }} />
+                  </div>
+                )}
+                <div style={{
+                  position: 'absolute', bottom: 0, left: 0, right: 0,
+                  height: '100px', background: 'linear-gradient(to top, #ffffff, transparent)'
+                }} />
+              </div>
+
+              <div style={{ padding: '0 2.5rem 2.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <span style={{
+                    background: 'rgba(5,80,60,0.05)', borderRadius: '9999px', padding: '0.4rem 1rem',
+                    fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.75rem', color: '#05503c',
+                    textTransform: 'uppercase', letterSpacing: '0.05em'
+                  }}>
+                    {selectedItem.category}
+                  </span>
+                  <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, color: '#fdca00', fontSize: '1.75rem' }}>
+                    {Number(selectedItem.price).toFixed(0)} <span style={{ fontSize: '0.85rem' }}>ETB</span>
+                  </p>
+                </div>
+
+                <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '2.5rem', color: '#05503c', letterSpacing: '-0.04em', lineHeight: 1.1, marginBottom: '1.5rem' }}>
+                  {selectedItem.name}
+                </h2>
+
+                <div style={{ marginBottom: '2rem' }}>
+                  <h4 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.9rem', color: '#05503c', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.75rem' }}>
+                    Description
+                  </h4>
+                  <p style={{ color: 'rgba(5,80,60,0.6)', lineHeight: 1.6, fontSize: '1rem' }}>
+                    {selectedItem.description}
+                  </p>
+                </div>
+
+                {selectedItem.ingredients && Array.isArray(selectedItem.ingredients) && selectedItem.ingredients.length > 0 && (
+                  <div style={{ marginBottom: '2.5rem' }}>
+                    <h4 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.9rem', color: '#05503c', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '1rem' }}>
+                      Ingredients
+                    </h4>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem' }}>
+                      {selectedItem.ingredients.map((ing: string, i: number) => (
+                        <span key={i} style={{
+                          padding: '0.5rem 1rem', borderRadius: '12px', background: 'rgba(5,80,60,0.03)',
+                          border: '1px solid rgba(5,80,60,0.06)', fontSize: '0.85rem', fontWeight: 600, color: '#05503c'
+                        }}>
+                          {ing}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  onClick={() => {
+                    if (selectedItem.stock_quantity > 0 && !isJoining) handleAddToCart(selectedItem);
+                    setSelectedItem(null);
+                  }}
+                  disabled={selectedItem.stock_quantity <= 0 || isJoining}
+                  className="btn-primary shimmer-btn"
+                  style={{ 
+                    width: '100%', padding: '1.25rem', fontSize: '1.1rem',
+                    display: 'flex', justifyContent: 'center', gap: '0.75rem',
+                    opacity: (selectedItem.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
+                    cursor: (selectedItem.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  <Plus size={20} /> Add to My Order
+                </button>
+              </div>
+            </div>
+          </div>
+          <style>{`
+            @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+            @keyframes modalScale { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+          `}</style>
         </div>
       )}
     </div>
