@@ -59,10 +59,16 @@ export default function AdminLogin() {
           borderRadius: 28,
           padding: 'clamp(1.75rem, 5vw, 2.75rem)',
           boxShadow: '0 20px 60px rgba(5,80,60,0.09), 0 4px 16px rgba(5,80,60,0.05)',
+          overflow: 'hidden',
         }}>
 
           {/* Top accent */}
-          <div style={{ height: 3, background: 'linear-gradient(90deg, #fdca00, rgba(253,202,0,0.2))', borderRadius: '999px 999px 0 0', margin: '-2.75rem -2.75rem 2.25rem', marginLeft: '-2.75rem', marginRight: '-2.75rem', marginTop: '-2.75rem', marginBottom: '2.25rem' }} />
+          <div style={{ 
+            height: 3, 
+            background: 'linear-gradient(90deg, #fdca00, rgba(253,202,0,0.2))', 
+            borderRadius: '28px 28px 0 0', 
+            margin: '-2.75rem -2.75rem 2.25rem -2.75rem' 
+          }} />
 
           {/* Icon */}
           <div style={{

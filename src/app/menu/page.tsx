@@ -3,26 +3,35 @@
 import { useEffect, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell } from 'lucide-react';
+import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell, Utensils } from 'lucide-react';
 import gsap from 'gsap';
 import useSWR from 'swr';
 import { useTabStore, MenuItem } from '@/store/tabStore';
 import { menuAPI, sessionAPI, orderAPI, adminAPI } from '@/lib/api';
 import { startManualSessionAction, placeOrderAction } from '@/app/admin/actions';
+import { initiatePaymentAction } from './actions';
+import { useAdminStore } from '@/store/adminStore';
+import { CreditCard } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 
 function MenuContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showCart, setShowCart] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sessionValid, setSessionValid] = useState(true); // Always true now to allow browsing
   const [placingOrder, setPlacingOrder] = useState(false);
+  const [settlingPayment, setSettlingPayment] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   
   // Manual Table Selection State
   const [showTableModal, setShowTableModal] = useState(false);
   const [manualTableNumber, setManualTableNumber] = useState('');
   const [manualLoading, setManualLoading] = useState(false);
+  const [isJoining, setIsJoining] = useState(!!(searchParams.get('table') && searchParams.get('token')));
   const [pendingItem, setPendingItem] = useState<MenuItem | null>(null);
   const [taxSettings, setTaxSettings] = useState({ vat_rate: 0.15, service_charge_rate: 0.10 });
   const [activeOrders, setActiveOrders] = useState<any[]>([]);
@@ -89,19 +98,37 @@ function MenuContent() {
   }, [menuItems]);
 
   useEffect(() => {
-    const tableNumber = searchParams.get('table');
-    const token = searchParams.get('token');
+    const urlTableNumber = searchParams.get('table');
+    const urlToken = searchParams.get('token');
 
-    if (tableNumber && token) {
-      // QR Code mode - auto join session
-      sessionAPI.create(parseInt(tableNumber), token).then(({ data, error }) => {
+    if (urlTableNumber && urlToken) {
+      // QR Code mode: clear any stale session, then join the scanned table
+      const urlTableNum = parseInt(urlTableNumber);
+
+      // If we already have a session for this exact table, skip re-creation
+      const currentTableNum = useTabStore.getState().tableNumber;
+      if (currentTableNum !== urlTableNum) {
+        // Different table (or no session) – clear stale data first
+        clearCart();
+      }
+
+      sessionAPI.create(urlTableNum, urlToken).then(({ data, error }) => {
         if (data && !error) {
-          setSession(data.table_number, data.table_id, token, data.session_id, data.session_token);
+          setSession(data.table_number, data.table_id, urlToken, data.session_id, data.session_token);
           if (data.message === 'Session created') {
             clearCart();
           }
+        } else {
+          console.error('QR session error:', error);
+          setToast({ 
+            message: 'QR code might be expired. Please join the table manually.', 
+            type: 'error' 
+          });
         }
+        setIsJoining(false);
       });
+    } else {
+      setIsJoining(false);
     }
 
     // Fetch tax settings from DB
@@ -134,8 +161,8 @@ function MenuContent() {
       console.log('Order Change Received:', payload);
       fetchOrders(); // Re-fetch on any change for simplicity/reliability
       
-      // If an order became 'ready', maybe show tracker or play sound (future)
-      if (payload.new && payload.new.status === 'ready' && payload.old && payload.old.status !== 'ready') {
+      // If an order became 'ready' or 'served', show tracker
+      if (payload.new && ['ready', 'served'].includes(payload.new.status) && !['ready', 'served'].includes(payload.old?.status)) {
         setShowTracker(true);
       }
     });
@@ -164,23 +191,31 @@ function MenuContent() {
   const handleStartManualSession = async (e: React.FormEvent) => {
     e.preventDefault();
     const tableNum = parseInt(manualTableNumber);
-    if (isNaN(tableNum)) return;
+    if (isNaN(tableNum) || tableNum <= 0) {
+      setToast({ message: 'Please enter a valid table number.', type: 'error' });
+      return;
+    }
 
     setManualLoading(true);
     try {
       const result = await startManualSessionAction(tableNum);
       if (result.success && result.data) {
         const { session_id, table_id, token, table_number, session_token } = result.data;
-        setSession(table_number, table_id, token, session_id, session_token);
+        // Close modal first so UI updates correctly
         setShowTableModal(false);
+        setManualTableNumber('');
+        // Set session in store
+        setSession(table_number, table_id, token, session_id, session_token);
         
-        // If they were trying to add an item, add it now
+        // If they were trying to add an item, add it immediately after session is set
         if (pendingItem) {
-          handleAddToCart(pendingItem);
+          const item = pendingItem;
           setPendingItem(null);
+          addToCart({ ...item, price: typeof item.price === 'string' ? parseFloat(item.price as any) : item.price });
+          gsap.fromTo('.cart-btn', { scale: 1 }, { scale: 1.1, duration: 0.15, yoyo: true, repeat: 1 });
         }
       } else {
-        alert(result.error || 'Failed to find table. Please check the number.');
+        setToast({ message: result.error || 'Failed to find table.', type: 'error' });
       }
     } finally {
       setManualLoading(false);
@@ -216,7 +251,7 @@ function MenuContent() {
       const { data: sessionData, error: sessionError } = await sessionAPI.get(sessionId);
       
       if (sessionError || !sessionData || sessionData.status !== 'open') {
-        alert('Your session has expired or been closed. Please scan the QR code again to start a new session.');
+        setToast({ message: 'Your session has expired. Please join again.', type: 'error' });
         clearCart();
         setShowCart(false);
         window.location.href = '/menu';
@@ -231,26 +266,45 @@ function MenuContent() {
         clearCart();
         setShowCart(false);
         setShowTracker(true);
+        setToast({ message: 'Order sent to the kitchen!', type: 'success' });
       } else {
         const error = result.error;
         const errorCode = (result as any).errorCode;
 
         if (errorCode === 'RATE_LIMITED') {
-          alert('Too many orders! Please wait a few minutes before placing another order.');
+          setToast({ message: 'Too many orders! Please wait a bit.', type: 'error' });
         } else if (errorCode === 'OUT_OF_STOCK') {
-          alert(`One or more items are out of stock: ${error}`);
-          // Ideally refresh menu items here
+          setToast({ message: `Out of stock: ${error}`, type: 'error' });
         } else if (error?.includes('closed') || error?.includes('paid') || errorCode === 'SESSION_CLOSED') {
-          alert('Your session has expired or been closed. Please scan the QR code again to start a new session.');
+          setToast({ message: 'Session expired. Please join again.', type: 'error' });
           clearCart();
           setShowCart(false);
           window.location.href = '/menu';
         } else {
-          alert('Failed to place order: ' + (error || 'Unknown error'));
+          setToast({ message: 'Failed to place order: ' + (error || 'Unknown error'), type: 'error' });
         }
       }
     } finally {
       setPlacingOrder(false);
+    }
+  };
+
+  const handleSettleBill = async () => {
+    if (!sessionId) return;
+    setSettlingPayment(true);
+    setPaymentError(null);
+    try {
+      const result = await initiatePaymentAction(sessionId);
+      if (result.success) {
+        // Redirect to a specialized payment instruction page
+        router.push(`/checkout/status?id=${result.paymentId}&init=true`);
+      } else {
+        setPaymentError(result.error || 'Failed to initiate payment');
+      }
+    } catch (err: any) {
+      setPaymentError(err.message || 'An unexpected error occurred');
+    } finally {
+      setSettlingPayment(false);
     }
   };
 
@@ -351,15 +405,16 @@ function MenuContent() {
               </h2>
             </div>
             
-            <div style={{ position: 'relative', minWidth: 'min(100%, 320px)' }}>
-              <Search style={{ position: 'absolute', left: '1.25rem', top: '50%', transform: 'translateY(-50%)', color: 'rgba(5,80,60,0.3)' }} size={18} />
+            <div style={{ position: 'relative', minWidth: 'min(100%, 320px)', flex: '1 1 280px' }}>
+              <Search style={{ position: 'absolute', left: '1.25rem', top: '50%', transform: 'translateY(-50%)', color: 'rgba(5,80,60,0.3)', pointerEvents: 'none', zIndex: 1 }} size={18} />
               <input
                 type="text"
                 placeholder="Search menu..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 style={{
-                  width: '100%', padding: '1rem 1.25rem 1rem 3.25rem', borderRadius: 20,
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '1rem 1.25rem 1rem 3.25rem', borderRadius: 20,
                   border: '1.5px solid rgba(5,80,60,0.1)',
                   background: '#ffffff', color: '#05503c', fontFamily: 'var(--font-instrument)', fontSize: '0.95rem',
                   outline: 'none', transition: 'border-color 0.2s, box-shadow 0.2s'
@@ -491,21 +546,21 @@ function MenuContent() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (item.stock_quantity > 0) handleAddToCart(item);
+                      if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item);
                     }}
-                    disabled={item.stock_quantity <= 0}
+                    disabled={item.stock_quantity <= 0 || isJoining}
                     className="btn-primary shimmer-btn"
                     style={{ 
                       width: '100%', 
                       display: 'flex', 
                       justifyContent: 'center',
-                      opacity: item.stock_quantity <= 0 ? 0.5 : 1,
-                      cursor: item.stock_quantity <= 0 ? 'not-allowed' : 'pointer',
-                      background: item.stock_quantity <= 0 ? 'rgba(5,80,60,0.1)' : undefined,
-                      color: item.stock_quantity <= 0 ? 'rgba(5,80,60,0.4)' : undefined
+                      opacity: (item.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
+                      cursor: (item.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer',
+                      background: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.1)' : undefined,
+                      color: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.4)' : undefined
                     }}
                   >
-                    <Plus size={16} /> {item.stock_quantity <= 0 ? 'Sold Out' : 'Add to Order'}
+                    <Plus size={16} /> {isJoining ? 'Joining Table...' : item.stock_quantity <= 0 ? 'Sold Out' : 'Add to Order'}
                   </button>
                 </div>
               </div>
@@ -674,8 +729,9 @@ function MenuContent() {
             <div style={{ flex: 1, overflowY: 'auto', padding: '2rem' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
                 {activeOrders.map((order) => {
-                  const isReady = order.status === 'ready';
-                  const isPreparing = order.status === 'preparing';
+                  const isServed = order.status === 'served';
+                  const isReady = order.status === 'ready' || isServed;
+                  const isPreparing = order.status === 'preparing' || isReady;
 
                   return (
                     <div key={order.id} style={{
@@ -692,11 +748,11 @@ function MenuContent() {
                         </div>
                         <div style={{
                           padding: '0.4rem 0.8rem', borderRadius: 10,
-                          background: isReady ? '#fdca00' : isPreparing ? 'rgba(5,80,60,0.1)' : 'rgba(5,80,60,0.05)',
-                          color: '#05503c',
+                          background: isServed ? 'rgba(34,197,94,0.1)' : isReady ? '#fdca00' : isPreparing ? 'rgba(5,80,60,0.1)' : 'rgba(5,80,60,0.05)',
+                          color: isServed ? '#22c55e' : '#05503c',
                           fontFamily: 'var(--font-bricolage)', fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase'
                         }}>
-                          {order.status === 'ready' ? 'Ready!' : order.status === 'preparing' ? 'In Kitchen' : 'Received'}
+                          {order.status === 'served' ? 'Served' : order.status === 'ready' ? 'Ready!' : order.status === 'preparing' ? 'In Kitchen' : 'Received'}
                         </div>
                       </div>
 
@@ -706,15 +762,16 @@ function MenuContent() {
                         <div style={{ position: 'absolute', top: 15, left: '10%', right: '10%', height: 2, background: 'rgba(5,80,60,0.06)', zIndex: 0 }} />
                         <div style={{ 
                           position: 'absolute', top: 15, left: '10%', 
-                          width: isReady ? '80%' : isPreparing ? '40%' : '0%', 
-                          height: 2, background: '#fdca00', zIndex: 1, transition: 'width 0.8s ease' 
+                          width: isServed ? '80%' : isReady ? '53.3%' : isPreparing ? '26.6%' : '0%', 
+                          height: 2, background: isServed ? '#22c55e' : '#fdca00', zIndex: 1, transition: 'width 0.8s ease' 
                         }} />
 
                         {/* Steps */}
                         {[
                           { label: 'Sent', icon: CheckCircle, active: true },
-                          { label: 'Preparing', icon: ChefHat, active: isPreparing || isReady },
+                          { label: 'Preparing', icon: ChefHat, active: isPreparing },
                           { label: 'Ready', icon: Bell, active: isReady },
+                          { label: 'Served', icon: Utensils, active: isServed },
                         ].map((step, sIdx) => {
                           const Icon = step.icon;
                           const active = step.active;
@@ -728,9 +785,9 @@ function MenuContent() {
                                 transition: 'all 0.4s ease',
                                 boxShadow: active ? '0 0 15px rgba(253,202,0,0.3)' : 'none'
                               }}>
-                                <Icon size={14} strokeWidth={active ? 3 : 2} />
+                                <Icon size={14} strokeWidth={active ? 3 : 2} style={{ color: active && isServed && step.label === 'Served' ? '#22c55e' : undefined }} />
                               </div>
-                              <span style={{ fontSize: '0.6rem', fontWeight: 800, color: active ? '#05503c' : 'rgba(5,80,60,0.3)', textTransform: 'uppercase' }}>{step.label}</span>
+                              <span style={{ fontSize: '0.6rem', fontWeight: 800, color: active ? (isServed && step.label === 'Served' ? '#22c55e' : '#05503c') : 'rgba(5,80,60,0.3)', textTransform: 'uppercase' }}>{step.label}</span>
                             </div>
                           );
                         })}
@@ -749,12 +806,94 @@ function MenuContent() {
               </div>
             </div>
 
-            <div style={{ padding: '1.5rem', background: '#fff', textAlign: 'center' }}>
-              <p style={{ fontSize: '0.75rem', color: 'rgba(5,80,60,0.4)' }}>
-                We will notify you when your food is ready.
+            <div style={{ padding: '2rem', background: '#fff', textAlign: 'center', borderTop: '1px solid rgba(5,80,60,0.07)' }}>
+              {paymentError && (
+                <div style={{ 
+                  background: 'rgba(239, 68, 68, 0.05)', 
+                  border: '1px solid rgba(239, 68, 68, 0.1)', 
+                  borderRadius: '16px', 
+                  padding: '1rem', 
+                  marginBottom: '1.5rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                  color: '#ef4444',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  textAlign: 'left'
+                }}>
+                  <XCircle size={20} />
+                  <span>{paymentError}</span>
+                </div>
+              )}
+
+              <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(5,80,60,0.4)', marginBottom: '1.5rem', letterSpacing: '0.01em' }}>
+                {activeOrders.every(o => o.status === 'served') ? "All your orders have been served. Enjoy!" : "We will notify you when your food is ready."}
               </p>
+              
+              <button
+                onClick={handleSettleBill}
+                disabled={settlingPayment || activeOrders.length === 0}
+                className="btn-primary shimmer-btn"
+                style={{
+                  width: '100%', padding: '1.3rem', borderRadius: 24,
+                  background: settlingPayment ? 'rgba(5,80,60,0.05)' : 'linear-gradient(135deg, #05503c, #0a6b51)',
+                  color: settlingPayment ? '#05503c' : '#ffffff',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem',
+                  boxShadow: settlingPayment ? 'none' : '0 12px 40px rgba(5,80,60,0.25)',
+                  fontSize: '1.05rem',
+                  fontFamily: 'var(--font-bricolage)',
+                  fontWeight: 800,
+                  opacity: (activeOrders.length === 0) ? 0.5 : 1,
+                  cursor: (settlingPayment || activeOrders.length === 0) ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                  border: settlingPayment ? '1px solid rgba(5,80,60,0.1)' : 'none',
+                  outline: 'none',
+                  position: 'relative',
+                  overflow: 'hidden'
+                }}
+              >
+                {settlingPayment ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div style={{ width: 20, height: 20, border: '3px solid rgba(5,80,60,0.1)', borderTopColor: '#05503c', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                    <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+                    <span>Securing Session...</span>
+                  </div>
+                ) : (
+                  <>
+                    <CreditCard size={22} strokeWidth={2.5} />
+                    <span>Pay Bill with Sheger Pay</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
+        </div>
+      )}
+      {/* Toast Notification System */}
+      {toast && (
+        <div 
+          style={{
+            position: 'fixed', bottom: '2.5rem', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 200, padding: '1rem 1.5rem', borderRadius: '1.25rem',
+            background: toast.type === 'error' ? '#ef4444' : toast.type === 'success' ? '#05503c' : '#ffffff',
+            color: toast.type === 'info' ? '#05503c' : '#ffffff',
+            boxShadow: '0 15px 50px rgba(0,0,0,0.15)',
+            display: 'flex', alignItems: 'center', gap: '0.75rem',
+            animation: 'slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+            fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.9rem',
+            minWidth: '280px', pointerEvents: 'auto',
+            border: toast.type === 'info' ? '1px solid rgba(5,80,60,0.1)' : 'none'
+          }}
+          onClick={() => setToast(null)}
+        >
+          {toast.type === 'error' ? <XCircle size={20} /> : toast.type === 'success' ? <CheckCircle size={20} /> : <Bell size={20} />}
+          {toast.message}
+          <style>{`
+            @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+          `}</style>
+          {/* Auto-dismiss after 4s */}
+          {setTimeout(() => setToast(null), 4000) && null}
         </div>
       )}
     </div>

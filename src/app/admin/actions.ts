@@ -9,17 +9,22 @@ import { createClient } from '@supabase/supabase-js';
  * Helper to verify that the request is coming from an authorized admin.
  * We check the user's role from the JWT stored in cookies.
  */
-async function verifyAdmin(allowedRoles: string[] = ['admin', 'super_admin', 'manager', 'kitchen']) {
+async function verifyAdmin(allowedRoles: string[] = ['admin', 'super_admin', 'manager', 'kitchen'], token?: string) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
   
-  // This client will automatically use cookies if we pass them
   const supabase = createClient(supabaseUrl, supabaseAnonKey);
   
-  const { data: { user }, error } = await supabase.auth.getUser();
-  
-  if (error || !user) {
-    throw new Error('Unauthorized: No active session');
+  let user;
+  if (token) {
+    const { data: { user: u }, error } = await supabase.auth.getUser(token);
+    if (error || !u) throw new Error('Unauthorized: Invalid or expired token');
+    user = u;
+  } else {
+    // Fallback to cookies if no token provided (useful for future transitions)
+    const { data: { user: u }, error } = await supabase.auth.getUser();
+    if (error || !u) throw new Error('Unauthorized: No active session');
+    user = u;
   }
 
   const role = user.user_metadata?.role || 'admin';
@@ -35,9 +40,9 @@ async function verifyAdmin(allowedRoles: string[] = ['admin', 'super_admin', 'ma
  * They are only executed on the server, keeping your secret key safe.
  */
 
-export async function toggleMenuItemAvailability(id: number, isAvailable: boolean) {
+export async function toggleMenuItemAvailability(id: number, isAvailable: boolean, token?: string) {
   try {
-    await verifyAdmin();
+    await verifyAdmin(['admin', 'super_admin', 'manager', 'kitchen'], token);
     const { error } = await supabaseAdmin
       .from('menu_items')
       .update({ is_available: isAvailable })
@@ -52,9 +57,9 @@ export async function toggleMenuItemAvailability(id: number, isAvailable: boolea
   }
 }
 
-export async function deleteMenuItem(id: number) {
+export async function deleteMenuItem(id: number, token?: string) {
   try {
-    await verifyAdmin(['admin', 'super_admin', 'manager']);
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     const { error } = await supabaseAdmin
       .from('menu_items')
       .delete()
@@ -69,9 +74,9 @@ export async function deleteMenuItem(id: number) {
   }
 }
 
-export async function saveMenuItem(itemData: any, id?: number) {
+export async function saveMenuItem(itemData: any, id?: number, token?: string) {
   try {
-    await verifyAdmin(['admin', 'super_admin', 'manager']);
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     let result;
     if (id) {
       result = await supabaseAdmin
@@ -99,8 +104,9 @@ export async function saveMenuItem(itemData: any, id?: number) {
   }
 }
 
-export async function deleteTableAction(id: number) {
+export async function deleteTableAction(id: number, token?: string) {
   try {
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     const { error } = await supabaseAdmin
       .from('tables')
       .delete()
@@ -114,8 +120,9 @@ export async function deleteTableAction(id: number) {
     return { error: error.message };
   }
 }
-export async function createTableAction(number: number) {
+export async function createTableAction(number: number, token?: string) {
   try {
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     const { data, error } = await supabaseAdmin
       .from('tables')
       .insert({ 
@@ -135,8 +142,9 @@ export async function createTableAction(number: number) {
   }
 }
 
-export async function saveAdminAction(adminData: any, id?: string) {
+export async function saveAdminAction(adminData: any, id?: string, token?: string) {
   try {
+    await verifyAdmin(['super_admin', 'admin'], token);
     const { username, password, role, full_name } = adminData;
     const email = username.includes('@') ? username : `${username}@eset.com`;
 
@@ -196,8 +204,9 @@ export async function saveAdminAction(adminData: any, id?: string) {
   }
 }
 
-export async function deleteAdminAction(id: string) {
+export async function deleteAdminAction(id: string, token?: string) {
   try {
+    await verifyAdmin(['super_admin', 'admin'], token);
     const { error } = await supabaseAdmin
       .from('admin_users')
       .delete()
@@ -211,22 +220,28 @@ export async function deleteAdminAction(id: string) {
     return { error: error.message };
   }
 }
+// NOTE: This action is intentionally public — no admin auth required.
+// Customers use this to join a table by entering its number manually.
 export async function startManualSessionAction(tableNumber: number) {
   try {
+    // Use supabaseAdmin (service role) to bypass RLS so guests can create sessions
     const { data: table, error: tableError } = await supabaseAdmin
       .from('tables')
       .select('id, token, status')
       .eq('number', tableNumber)
       .single();
 
-    if (tableError || !table) throw new Error('Table not found');
+    if (tableError || !table) {
+      return { error: 'Table not found. Please check the table number and try again.' };
+    }
 
+    // Check for an existing open session on this table
     const { data: existingSession } = await supabaseAdmin
       .from('sessions')
       .select('id, status, token')
       .eq('table_id', table.id)
       .eq('status', 'open')
-      .order('created_at', { ascending: false })
+      .order('opened_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -244,7 +259,7 @@ export async function startManualSessionAction(tableNumber: number) {
       };
     }
 
-    // 3. Create new session with secure token
+    // Create a new session with a secure token
     const sessionToken = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
     const { data: newSession, error: createError } = await supabaseAdmin
       .from('sessions')
@@ -254,28 +269,28 @@ export async function startManualSessionAction(tableNumber: number) {
 
     if (createError) throw createError;
 
-    // 4. Update table status to occupied
+    // Update table status to occupied
     await supabaseAdmin
       .from('tables')
       .update({ status: 'occupied' })
       .eq('id', table.id);
 
-     return { 
-       data: { 
-         session_id: newSession.id, 
-         session_token: sessionToken,
-         table_id: table.id, 
-         table_number: tableNumber, 
-         token: table.token,
-         message: 'Session created'
-       }, 
-       success: true 
-     };
-   } catch (error: any) {
-     console.error('Server Action Error (startManualSessionAction):', error);
-     return { error: error.message };
-   }
- }
+    return { 
+      data: { 
+        session_id: newSession.id, 
+        session_token: sessionToken,
+        table_id: table.id, 
+        table_number: tableNumber, 
+        token: table.token,
+        message: 'Session created'
+      }, 
+      success: true 
+    };
+  } catch (error: any) {
+    console.error('Server Action Error (startManualSessionAction):', error);
+    return { error: error.message };
+  }
+}
  
  export async function placeOrderAction(sessionId: number, items: any[], notes?: string, sessionToken: string = '') {
   try {
@@ -302,9 +317,9 @@ export async function startManualSessionAction(tableNumber: number) {
   }
 }
 
-export async function updateOrderStatus(orderId: number, status: string) {
+export async function updateOrderStatus(orderId: number, status: string, token?: string) {
   try {
-    await verifyAdmin();
+    await verifyAdmin(['admin', 'super_admin', 'manager', 'kitchen'], token);
     const { error } = await supabaseAdmin
       .from('orders')
       .update({ status })
@@ -319,9 +334,9 @@ export async function updateOrderStatus(orderId: number, status: string) {
   }
 }
 
-export async function confirmPaymentAction(sessionId: number, paymentMethod: string = 'cash') {
+export async function confirmPaymentAction(sessionId: number, paymentMethod: string = 'cash', token?: string) {
   try {
-    await verifyAdmin();
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     // 1. Get official totals from DB first
     const { data: billData, error: billError } = await supabaseAdmin.rpc('get_session_bill', {
       p_session_id: sessionId
@@ -353,9 +368,9 @@ export async function confirmPaymentAction(sessionId: number, paymentMethod: str
   }
 }
 
-export async function cancelSessionAction(sessionId: number) {
+export async function cancelSessionAction(sessionId: number, token?: string) {
   try {
-    await verifyAdmin();
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
     const { data: session, error: fetchError } = await supabaseAdmin
       .from('sessions')
       .select('table_id')
@@ -389,9 +404,9 @@ export async function cancelSessionAction(sessionId: number) {
   }
 }
 
-export async function resetDashboardData() {
+export async function resetDashboardData(token?: string) {
   try {
-    await verifyAdmin(['super_admin', 'manager']);
+    await verifyAdmin(['super_admin', 'manager', 'admin'], token);
     // The order is important due to potential foreign key constraints
     // 1. Delete all payments
     const { error: pError } = await supabaseAdmin.from('payments').delete().neq('id', -1);
@@ -417,6 +432,37 @@ export async function resetDashboardData() {
     return { success: true };
   } catch (error: any) {
     console.error('Server Action Error (resetDashboardData):', error);
+    return { error: error.message };
+  }
+}
+
+export async function updatePaymentStatusAction(id: string, newStatus: 'approved' | 'rejected', reason?: string, token?: string) {
+  try {
+    await verifyAdmin(['admin', 'super_admin', 'manager'], token);
+    
+    const updateData: any = { status: newStatus };
+    if (reason) {
+      // Fetch current metadata to preserve it
+      const { data: payment } = await supabaseAdmin
+        .from('payments')
+        .select('metadata')
+        .eq('id', id)
+        .single();
+        
+      updateData.metadata = { ...(payment?.metadata || {}), rejection_reason: reason };
+    }
+
+    const { error } = await supabaseAdmin
+      .from('payments')
+      .update(updateData)
+      .eq('id', id);
+
+    if (error) throw error;
+    
+    revalidatePath('/admin');
+    return { success: true };
+  } catch (error: any) {
+    console.error('Server Action Error (updatePaymentStatusAction):', error);
     return { error: error.message };
   }
 }

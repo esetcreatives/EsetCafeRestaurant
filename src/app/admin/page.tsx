@@ -6,7 +6,7 @@ import Link from 'next/link';
 import {
   LogOut, RefreshCw, DollarSign, ShoppingBag, Users,
   CheckCircle, ChefHat, LayoutGrid, Menu, X, TrendingUp,
-  Coffee, Circle, ArrowRight, Plus, Edit2, Trash2, Save, Upload, Image as ImageIcon, Download, Mail
+  Coffee, Circle, ArrowRight, Plus, Edit2, Trash2, Save, Upload, Image as ImageIcon, Download, Mail, CreditCard
 } from 'lucide-react';
 import gsap from 'gsap';
 import { Draggable } from 'gsap/all';
@@ -15,6 +15,7 @@ import { orderAPI, adminAPI, menuAPI, uploadAPI } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 import { polling } from '@/lib/polling';
 import * as actions from './actions';
+import PaymentAdmin from './components/PaymentAdmin';
 
 if (typeof window !== 'undefined') {
   gsap.registerPlugin(Draggable);
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { id: 'sessions', label: 'Tables', short: 'Tables', icon: Users, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'billing', label: 'Billing', short: 'Billing', icon: DollarSign, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'menu', label: 'Menu', short: 'Menu', icon: Coffee, roles: ['super_admin', 'manager', 'admin'] },
+  { id: 'payments', label: 'Payments', short: 'Payments', icon: CreditCard, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'admins', label: 'Admins', short: 'Admins', icon: Users, roles: ['super_admin', 'admin'] },
 ] as const;
 
@@ -112,7 +114,7 @@ export default function AdminDashboard() {
       { id: 'desserts', label: 'Desserts' },
       { id: 'beverages', label: 'Beverages' },
     ];
-    
+
     const dbCats = menuItems ? Array.from(new Set(menuItems.map(item => item.category))) : [];
     const otherCats = dbCats
       .filter(cat => !hardcoded.find(h => h.id === cat))
@@ -202,6 +204,7 @@ export default function AdminDashboard() {
         loadOrders();
         loadDashboard();
         loadSessions(); // Orders affect session totals
+        loadTables();   // Ensure table cards show new orders/totals
       })
       .subscribe();
 
@@ -231,6 +234,16 @@ export default function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const getFreshToken = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token || localStorage.getItem('admin_token') || '';
+    // Optional: Keep localStorage in sync if it changed
+    if (session?.access_token && session.access_token !== localStorage.getItem('admin_token')) {
+      localStorage.setItem('admin_token', session.access_token);
+    }
+    return token;
+  };
+
   const loadData = async () => {
     setLoading(true);
 
@@ -243,12 +256,13 @@ export default function AdminDashboard() {
         .single();
 
       if (profile) {
+        const token = await getFreshToken();
         setAuth({
           ...user,
           full_name: profile.full_name,
           username: profile.username,
           role: profile.role
-        }, localStorage.getItem('admin_token') || '');
+        }, token);
       }
     }
 
@@ -283,23 +297,23 @@ export default function AdminDashboard() {
 
   const loadOrders = async () => { const { data } = await orderAPI.getAll(); if (data && Array.isArray(data)) setOrders(data); };
   const loadSessions = async () => { const { data } = await adminAPI.getSessions(); if (data && Array.isArray(data)) setSessions(data); };
-  const loadTables = async () => { 
-    const { data } = await adminAPI.getTables(); 
+  const loadTables = async () => {
+    const { data } = await adminAPI.getTables();
     if (data && Array.isArray(data)) {
       setTables(data);
-      
+
       // Proactively fetch session orders for all occupied tables to fix the "0 orders" issue
       const occupiedTables = data.filter(t => t.session_id);
       for (const table of occupiedTables) {
-        if (!sessionOrders[table.session_id]) {
-          adminAPI.getSessionDetail(table.session_id).then(res => {
-            if (res.data && res.data.orders) {
-              setSessionOrders(prev => ({ ...prev, [table.session_id]: res.data.orders }));
-            }
-          });
-        }
+        // Always refresh session orders to ensure totals stay in sync
+        orderAPI.getSessionOrders(table.session_id).then(res => {
+          const fetchedOrders = res.data;
+          if (fetchedOrders) {
+            setSessionOrders(prev => ({ ...prev, [table.session_id]: fetchedOrders }));
+          }
+        });
       }
-    } 
+    }
   };
   const loadReport = async () => { const { data } = await adminAPI.getReport(); if (data) setReport(data); };
   const loadMenu = async () => {
@@ -346,7 +360,8 @@ export default function AdminDashboard() {
   };
 
   const handleStatusChange = async (orderId: number, status: string) => {
-    const { error } = await actions.updateOrderStatus(orderId, status);
+    const token = await getFreshToken();
+    const { error } = await actions.updateOrderStatus(orderId, status, token);
     if (!error) updateOrderStatus(orderId, status);
     else alert('Failed to update status: ' + error);
   };
@@ -364,7 +379,8 @@ export default function AdminDashboard() {
   };
 
   const handleToggleAvailability = async (itemId: number, cur: boolean) => {
-    const { error } = await actions.toggleMenuItemAvailability(itemId, !cur);
+    const token = await getFreshToken();
+    const { error } = await actions.toggleMenuItemAvailability(itemId, !cur, token);
     if (!error) setMenuItems(items => items.map(i => i.id === itemId ? { ...i, is_available: !cur } : i));
     else alert('Failed to update availability: ' + error);
   };
@@ -387,7 +403,8 @@ export default function AdminDashboard() {
 
     if (!confirm(`Confirm ${method} payment?\n\nSubtotal: ${sub.toFixed(0)} ETB\nVAT (15%): ${v.toFixed(0)} ETB\nService (10%): ${s.toFixed(0)} ETB\nTotal: ${tot.toFixed(0)} ETB`)) return;
 
-    const { data, error } = await actions.confirmPaymentAction(sessionId, method);
+    const token = await getFreshToken();
+    const { data, error } = await actions.confirmPaymentAction(sessionId, method, token);
     if (!error && data) {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
@@ -403,15 +420,17 @@ export default function AdminDashboard() {
     setExpandedTable(isOpen ? null : table.id);
     if (!isOpen && !sessionOrders[table.session_id]) {
       const { data } = await adminAPI.getSessionDetail(table.session_id);
-      if (data && data.orders) {
-        setSessionOrders(prev => ({ ...prev, [table.session_id]: data.orders }));
+      const fetchedOrders = data?.orders;
+      if (fetchedOrders) {
+        setSessionOrders(prev => ({ ...prev, [table.session_id]: fetchedOrders }));
       }
     }
   };
 
   const handleCancelSession = async (sessionId: number, tableNumber: number) => {
     if (!confirm(`Cancel session for Table ${tableNumber}? All orders will be voided.`)) return;
-    const { error } = await actions.cancelSessionAction(sessionId);
+    const token = await getFreshToken();
+    const { error } = await actions.cancelSessionAction(sessionId, token);
     if (!error) {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
@@ -438,7 +457,8 @@ export default function AdminDashboard() {
     }
 
     setResettingData(true);
-    const { success, error } = await actions.resetDashboardData();
+    const token = await getFreshToken();
+    const { success, error } = await actions.resetDashboardData(token);
     setResettingData(false);
 
     if (success) {
@@ -578,7 +598,8 @@ export default function AdminDashboard() {
     if (editingItem) console.log('Target ID:', editingItem.id);
 
     if (editingItem) {
-      const result = await actions.saveMenuItem(payload, editingItem.id);
+      const token = await getFreshToken();
+      const result = await actions.saveMenuItem(payload, editingItem.id, token);
       if (result.success) {
         console.log('Update result: Success');
         await loadMenu();
@@ -588,7 +609,8 @@ export default function AdminDashboard() {
         alert('Failed to update menu item: ' + result.error);
       }
     } else {
-      const result = await actions.saveMenuItem(payload);
+      const token = await getFreshToken();
+      const result = await actions.saveMenuItem(payload, undefined, token);
       if (result.success) {
         console.log('Create result: Success');
         await loadMenu();
@@ -604,7 +626,8 @@ export default function AdminDashboard() {
     console.log('Attempting to delete menu item:', id);
     if (!confirm('Are you sure you want to delete this menu item? This cannot be undone.')) return;
 
-    const { error } = await actions.deleteMenuItem(id);
+    const token = await getFreshToken();
+    const { error } = await actions.deleteMenuItem(id, token);
     console.log('Menu delete result:', { error });
     if (!error) {
       loadMenu();
@@ -651,7 +674,8 @@ export default function AdminDashboard() {
     }
     setAdminSaving(true);
     if (editingAdmin) {
-      const { error } = await actions.saveAdminAction(adminForm, editingAdmin.id);
+      const token = await getFreshToken();
+      const { error } = await actions.saveAdminAction(adminForm, editingAdmin.id, token);
       setAdminSaving(false);
       if (!error) {
         await loadAdminUsers();
@@ -664,7 +688,8 @@ export default function AdminDashboard() {
         }
       }
     } else {
-      const { error } = await actions.saveAdminAction(adminForm);
+      const token = await getFreshToken();
+      const { error } = await actions.saveAdminAction(adminForm, undefined, token);
       setAdminSaving(false);
       if (!error) {
         await loadAdminUsers();
@@ -686,7 +711,8 @@ export default function AdminDashboard() {
       return;
     }
     if (!confirm(`Delete admin user "${username}"? This cannot be undone.`)) return;
-    const { error } = await actions.deleteAdminAction(id);
+    const token = await getFreshToken();
+    const { error } = await actions.deleteAdminAction(id, token);
     console.log('Admin delete result:', { error });
     if (!error) {
       await loadAdminUsers();
@@ -700,7 +726,8 @@ export default function AdminDashboard() {
     const num = parseInt(newTableNumber);
     if (!num || num < 1) { alert('Enter a valid table number'); return; }
     setTableActionLoading(-1);
-    const { data, error } = await actions.createTableAction(num);
+    const token = await getFreshToken();
+    const { data, error } = await actions.createTableAction(num, token);
     setTableActionLoading(null);
     if (!error && data) {
       setNewTableNumber('');
@@ -716,7 +743,8 @@ export default function AdminDashboard() {
     if (status === 'occupied') { alert('Cannot delete an occupied table.'); return; }
     if (!confirm(`Delete Table ${tableNumber}? This cannot be undone.`)) return;
     setTableActionLoading(tableId);
-    const { error } = await actions.deleteTableAction(tableId);
+    const token = await getFreshToken();
+    const { error } = await actions.deleteTableAction(tableId, token);
     console.log('Table delete result:', { error });
     setTableActionLoading(null);
     if (!error) {
@@ -1210,8 +1238,22 @@ export default function AdminDashboard() {
                                   </div>
                                 ))
                               ) : (
-                                <div style={{ gridColumn: 'span 100', textAlign: 'center', padding: '3rem', background: 'rgba(5,80,60,0.02)', borderRadius: 20, border: '1px dashed rgba(5,80,60,0.1)' }}>
-                                  <p style={{ color: 'rgba(5,80,60,0.3)', fontSize: '0.9rem' }}>No active sessions right now</p>
+                                <div style={{
+                                  gridColumn: '1 / -1',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  textAlign: 'center',
+                                  padding: '4rem 2rem',
+                                  background: 'rgba(5,80,60,0.02)',
+                                  borderRadius: 24,
+                                  border: '1px dashed rgba(5,80,60,0.1)',
+                                  width: '100%'
+                                }}>
+                                  <Users size={32} style={{ color: 'rgba(5,80,60,0.15)', marginBottom: '1rem' }} />
+                                  <p style={{ color: 'rgba(5,80,60,0.35)', fontSize: '0.95rem', fontWeight: 600 }}>No active sessions right now</p>
+                                  <p style={{ color: 'rgba(5,80,60,0.2)', fontSize: '0.8rem', marginTop: '0.25rem' }}>All tables are currently available</p>
                                 </div>
                               )}
                             </div>
@@ -2042,7 +2084,16 @@ export default function AdminDashboard() {
                     {/* Billing Stats */}
                     <div className="admin-stat-grid" style={{ marginBottom: '1rem' }}>
                       {[
-                        { label: 'Unpaid Revenue', val: `${tables.reduce((sum, t) => sum + (Number(t.subtotal) || 0) * 1.25, 0).toLocaleString()} ETB`, icon: DollarSign, accent: '#fdca00' },
+                        {
+                          label: 'Unpaid Revenue',
+                          val: `${tables.reduce((sum, t) => {
+                            const oList = sessionOrders[t.session_id] || [];
+                            const sub = (oList.reduce((s, o) => s + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0)) || Number(t.subtotal) || 0;
+                            return sum + (sub * 1.25);
+                          }, 0).toLocaleString()} ETB`,
+                          icon: DollarSign,
+                          accent: '#fdca00'
+                        },
                         { label: 'Active Sessions', val: tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length, icon: Users, accent: '#05503c' },
                         { label: 'Pending Items', val: tables.reduce((sum, t) => sum + (Number(t.pending_count) || 0), 0), icon: ShoppingBag, accent: '#ef4444' },
                       ].map((stat, i) => {
@@ -2069,9 +2120,19 @@ export default function AdminDashboard() {
                     </div>
 
                     {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length === 0 ? (
-                      <div className="admin-empty-state" style={{ padding: '5rem 2rem' }}>
+                      <div style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        textAlign: 'center',
+                        padding: '6rem 2rem',
+                        background: 'rgba(5,80,60,0.02)',
+                        borderRadius: 24,
+                        border: '1px dashed rgba(5,80,60,0.1)'
+                      }}>
                         <DollarSign size={48} strokeWidth={1} style={{ color: 'rgba(5,80,60,0.15)', marginBottom: '1.5rem' }} />
-                        <p style={{ fontFamily: 'var(--font-bricolage)', fontSize: '1.2rem', color: 'rgba(5,80,60,0.3)' }}>No active sessions to bill</p>
+                        <p style={{ fontFamily: 'var(--font-bricolage)', fontSize: '1.2rem', color: 'rgba(5,80,60,0.35)', fontWeight: 600 }}>No active sessions to bill</p>
                         <p style={{ fontSize: '0.9rem', color: 'rgba(5,80,60,0.2)', marginTop: '0.5rem' }}>All tables are currently available</p>
                       </div>
                     ) : (
@@ -2080,7 +2141,7 @@ export default function AdminDashboard() {
                           const isExpanded = expandedTable === table.id;
                           const orders = sessionOrders[table.session_id] || [];
                           const subtotal = (orders.reduce((sum: number, o: any) => sum + (o.items?.reduce((os: number, i: any) => os + (i.quantity * i.unit_price), 0) || 0), 0)) || Number(table.subtotal) || 0;
-                          
+
                           // Official rates from Ethiopia (15% VAT, 10% Svc)
                           const vat = subtotal * 0.15;
                           const service = subtotal * 0.10;
@@ -2120,7 +2181,7 @@ export default function AdminDashboard() {
                                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
                                   }}
                                 >
-                                  {isExpanded ? 'Hide Items' : `View ${table.order_count || 0} Orders`}
+                                  {isExpanded ? 'Hide Items' : `View ${orders.length || table.order_count || 0} Orders`}
                                   <ArrowRight size={14} style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
                                 </button>
 
@@ -2215,6 +2276,11 @@ export default function AdminDashboard() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {/* ════ PAYMENTS VIEW ══════════════════════════════ */}
+                {activeTab === 'payments' && (
+                  <PaymentAdmin />
                 )}
 
                 {/* ════ ADMIN MANAGEMENT ══════════════════════════ */}
@@ -2405,7 +2471,7 @@ export default function AdminDashboard() {
         >
           <div
             style={{
-              background: '#ffffff', 
+              background: '#ffffff',
               borderRadius: '24px',
               maxWidth: 600, width: '100%',
               maxHeight: '90vh', overflowY: 'auto',
