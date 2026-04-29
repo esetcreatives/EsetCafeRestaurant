@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell, Utensils } from 'lucide-react';
+import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell, Utensils, XCircle } from 'lucide-react';
 import gsap from 'gsap';
 import useSWR from 'swr';
 import { useTabStore, MenuItem } from '@/store/tabStore';
