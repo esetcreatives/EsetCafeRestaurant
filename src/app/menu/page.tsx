@@ -460,53 +460,60 @@ function MenuContent() {
             </div>
           </div>
 
-          {/* Category Dropdown */}
-          <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <div style={{ position: 'relative', width: '100%', maxWidth: '300px' }}>
-              <select
-                value={selectedCategory}
-                onChange={e => setSelectedCategory(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '1rem 1.5rem',
-                  paddingRight: '3rem',
-                  borderRadius: 20,
-                  border: '1.5px solid rgba(5,80,60,0.1)',
-                  background: '#ffffff',
-                  color: '#05503c',
-                  fontFamily: 'var(--font-bricolage)',
-                  fontWeight: 700,
-                  fontSize: '1rem',
-                  cursor: 'pointer',
-                  appearance: 'none',
-                  outline: 'none',
-                  transition: 'all 0.2s ease',
-                  boxShadow: '0 4px 20px rgba(5,80,60,0.04)',
-                }}
-                onFocus={e => e.currentTarget.style.borderColor = '#fdca00'}
-                onBlur={e => e.currentTarget.style.borderColor = 'rgba(5,80,60,0.1)'}
-              >
-                {categories.map((cat: any) => (
-                  <option key={cat.id} value={cat.id}>{cat.label}</option>
-                ))}
-              </select>
-              <div style={{ 
-                position: 'absolute', right: '1.5rem', top: '50%', transform: 'translateY(-50%)',
-                pointerEvents: 'none', color: '#05503c' 
-              }}>
-                <ArrowRight size={20} style={{ transform: 'rotate(90deg)' }} />
-              </div>
-            </div>
+          {/* Category Filter Buttons */}
+          <div style={{ 
+            display: 'flex', 
+            overflowX: 'auto', 
+            gap: '0.6rem', 
+            padding: '0.5rem 0',
+            scrollbarWidth: 'none',
+            msOverflowStyle: 'none',
+            WebkitOverflowScrolling: 'touch',
+            justifyContent: 'flex-start',
+          }}>
+            <style>{`
+              div::-webkit-scrollbar { display: none; }
+            `}</style>
+            {categories.map((cat: any) => {
+              const isActive = selectedCategory === cat.id;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategory(cat.id)}
+                  style={{
+                    padding: '0.6rem 1.25rem',
+                    borderRadius: '999px',
+                    border: '1.5px solid',
+                    borderColor: isActive ? '#fdca00' : 'rgba(5,80,60,0.1)',
+                    background: isActive ? '#fdca00' : '#ffffff',
+                    color: '#05503c',
+                    fontFamily: 'var(--font-bricolage)',
+                    fontWeight: 700,
+                    fontSize: '0.8rem',
+                    whiteSpace: 'nowrap',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                    boxShadow: isActive ? '0 4px 15px rgba(253,202,0,0.25)' : 'none',
+                  }}
+                >
+                  {cat.label}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
 
       {/* Menu grid */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '2rem 1.5rem', position: 'relative', zIndex: 1 }}>
+      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '1rem 0.75rem', position: 'relative', zIndex: 1 }}>
         {menuLoading && menuItems.length === 0 ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))', gap: '1.5rem' }}>
+          <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 150px), 1fr))', 
+            gap: '0.75rem' 
+          }}>
             {[1, 2, 3, 4, 5, 6].map(i => (
-              <div key={i} style={{ height: 400, borderRadius: 24, background: 'rgba(5,80,60,0.03)', animation: 'pulse 1.5s infinite ease-in-out' }} />
+              <div key={i} style={{ height: 280, borderRadius: 20, background: 'rgba(5,80,60,0.03)', animation: 'pulse 1.5s infinite ease-in-out' }} />
             ))}
             <style>{`@keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }`}</style>
           </div>
@@ -516,21 +523,27 @@ function MenuContent() {
             <p style={{ fontFamily: 'var(--font-bricolage)', fontSize: '1.2rem', color: '#05503c' }}>No items found</p>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))', gap: '1.5rem' }}>
+          <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 150px), 1fr))', 
+            gap: '0.75rem' 
+          }}>
             {filteredItems.map(item => (
               <div
                 key={item.id}
                 className="menu-card"
                 onClick={() => setSelectedItem(item)}
                 style={{
-                  background: '#ffffff', borderRadius: 28, overflow: 'hidden',
+                  background: '#ffffff', borderRadius: 20, overflow: 'hidden',
                   border: '1px solid rgba(5,80,60,0.06)',
-                  boxShadow: '0 4px 30px rgba(5,80,60,0.04)',
+                  boxShadow: '0 4px 20px rgba(5,80,60,0.03)',
                   transition: 'transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column'
                 }}
               >
-                <div style={{ position: 'relative', height: 220, overflow: 'hidden' }}>
+                <div style={{ position: 'relative', height: 140, overflow: 'hidden' }}>
                   {item.image_url ? (
                     <img
                       src={item.image_url}
@@ -572,33 +585,71 @@ function MenuContent() {
                   </div>
                 </div>
 
-                <div style={{ padding: '1.5rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
-                    <h3 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.15rem', color: '#05503c', letterSpacing: '-0.02em' }}>{item.name}</h3>
-                    <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, color: '#fdca00', fontSize: '1.15rem' }}>{Number(item.price).toFixed(0)} <span style={{ fontSize: '0.65rem' }}>ETB</span></p>
+                <div style={{ padding: '0.75rem', flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.4rem', gap: '0.4rem' }}>
+                    <h3 style={{ 
+                      fontFamily: 'var(--font-bricolage)', 
+                      fontWeight: 800, 
+                      fontSize: '0.9rem', 
+                      color: '#05503c', 
+                      letterSpacing: '-0.01em',
+                      lineHeight: 1.2,
+                      flex: 1
+                    }}>
+                      {item.name}
+                    </h3>
+                    <p style={{ 
+                      fontFamily: 'var(--font-bricolage)', 
+                      fontWeight: 800, 
+                      color: '#fdca00', 
+                      fontSize: '0.9rem',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {Number(item.price).toFixed(0)} <span style={{ fontSize: '0.55rem' }}>ETB</span>
+                    </p>
                   </div>
-                  <p style={{ fontSize: '0.85rem', color: 'rgba(5,80,60,0.6)', lineHeight: 1.5, marginBottom: '1.5rem', height: '2.55rem', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                  
+                  {/* Hide description on mobile to keep it compact */}
+                  <p style={{ 
+                    fontSize: '0.7rem', 
+                    color: 'rgba(5,80,60,0.5)', 
+                    lineHeight: 1.4, 
+                    marginBottom: '0.75rem', 
+                    height: '2rem', 
+                    overflow: 'hidden', 
+                    display: '-webkit-box', 
+                    WebkitLineClamp: 2, 
+                    WebkitBoxOrient: 'vertical' 
+                  }}>
                     {item.description}
                   </p>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item);
-                    }}
-                    disabled={item.stock_quantity <= 0 || isJoining}
-                    className="btn-primary shimmer-btn"
-                    style={{ 
-                      width: '100%', 
-                      display: 'flex', 
-                      justifyContent: 'center',
-                      opacity: (item.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
-                      cursor: (item.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer',
-                      background: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.1)' : undefined,
-                      color: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.4)' : undefined
-                    }}
-                  >
-                    <Plus size={16} /> {isJoining ? 'Joining Table...' : item.stock_quantity <= 0 ? 'Sold Out' : 'Add to Order'}
-                  </button>
+                  
+                  <div style={{ marginTop: 'auto' }}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item);
+                      }}
+                      disabled={item.stock_quantity <= 0 || isJoining}
+                      className="btn-primary shimmer-btn"
+                      style={{ 
+                        width: '100%', 
+                        padding: '0.5rem',
+                        fontSize: '0.7rem',
+                        display: 'flex', 
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        opacity: (item.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
+                        cursor: (item.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer',
+                        background: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.1)' : undefined,
+                        color: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.4)' : undefined,
+                        borderRadius: '12px'
+                      }}
+                    >
+                      <Plus size={12} /> {isJoining ? '...' : item.stock_quantity <= 0 ? 'Sold Out' : 'Order'}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
