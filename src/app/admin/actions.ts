@@ -396,6 +396,13 @@ export async function cancelSessionAction(sessionId: number, token?: string) {
 
     if (updateError) throw updateError;
 
+    // 3. Mark all pending/preparing orders as cancelled so they leave the kitchen
+    await supabaseAdmin
+      .from('orders')
+      .update({ status: 'cancelled' })
+      .eq('session_id', sessionId)
+      .in('status', ['pending', 'preparing']);
+
     revalidatePath('/admin');
     return { success: true };
   } catch (error: any) {
