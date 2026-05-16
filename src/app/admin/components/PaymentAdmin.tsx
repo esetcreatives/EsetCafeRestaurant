@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { CheckCircle, XCircle, Clock, CreditCard, RefreshCw, Printer, AlertCircle, ShieldCheck, Banknote, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { CheckCircle, XCircle, Clock, CreditCard, RefreshCw, Download, AlertCircle, ShieldCheck, Banknote, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { downloadReceiptAsPDF } from '@/lib/downloadReceipt';
 import gsap from 'gsap';
 import { ReceiptTemplate } from '@/components/admin/ReceiptTemplate';
 import { updatePaymentStatusAction } from '../actions';
+import { useDialog } from '@/components/ui/ConfirmDialog';
 
 interface Payment {
   id: string;
@@ -43,6 +45,7 @@ export default function PaymentAdmin() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>('all');
+  const dialog = useDialog();
 
   const copyCode = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -87,6 +90,17 @@ export default function PaymentAdmin() {
     }, 50);
   }
 
+  async function downloadReceipt(order: any, payment: Payment) {
+    setPrintData({ order, payment });
+    // Give React a tick to render the off-screen receipt before capturing
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    await downloadReceiptAsPDF(
+      'receipt-print',
+      `receipt-${payment.transaction_code}.pdf`
+    );
+    setPrintData(null);
+  }
+
   async function updateStatus(id: string, newStatus: 'approved' | 'rejected', reason?: string) {
     setActionLoading(id);
     
@@ -96,7 +110,7 @@ export default function PaymentAdmin() {
     const result = await updatePaymentStatusAction(id, newStatus, reason, token);
 
     if (result.error) {
-      alert('Failed to update status: ' + result.error);
+      await dialog.showAlert('Update Failed', 'Failed to update status: ' + result.error);
     } else {
       fetchPending();
     }
@@ -104,7 +118,11 @@ export default function PaymentAdmin() {
   }
 
   async function handleApprove(payment: Payment) {
-    const confirmApprove = confirm(`Approve payment ${payment.transaction_code}? This will mark it as paid in the system.`);
+    const confirmApprove = await dialog.showConfirm(
+      'Approve Payment',
+      `Approve payment ${payment.transaction_code}? This will mark it as paid in the system.`,
+      { confirmLabel: 'Approve Payment' }
+    );
     if (!confirmApprove) return;
 
     setActionLoading(payment.id);
@@ -116,7 +134,7 @@ export default function PaymentAdmin() {
     const result = await updatePaymentStatusAction(payment.id, 'approved', undefined, token);
 
     if (result.error) {
-      alert('Failed to approve payment: ' + result.error);
+      await dialog.showAlert('Approval Failed', 'Failed to approve payment: ' + result.error);
       setActionLoading(null);
       return;
     }
@@ -153,12 +171,7 @@ export default function PaymentAdmin() {
           )
         };
         
-        setPrintData({ order: formattedOrder, payment });
-        
-        setTimeout(() => {
-          window.print();
-          setPrintData(null);
-        }, 500);
+        await downloadReceipt(formattedOrder, payment);
       }
     }
 
@@ -166,8 +179,12 @@ export default function PaymentAdmin() {
     setActionLoading(null);
   }
 
-  function handleReject(id: string) {
-    const reason = prompt('Please enter a reason for rejection (e.g., "Insufficient amount", "Invalid reference"):');
+  async function handleReject(id: string) {
+    const reason = await dialog.showPrompt(
+      'Reject Payment',
+      'Please enter a reason for rejection (e.g., "Insufficient amount", "Invalid reference"):',
+      { placeholder: 'Reason for rejection', confirmLabel: 'Reject Payment' }
+    );
     if (reason === null) return;
     updateStatus(id, 'rejected', reason || 'No reason provided');
   }
@@ -200,18 +217,6 @@ export default function PaymentAdmin() {
               {pendingCount} awaiting review
             </div>
           )}
-          <button
-            onClick={fetchPending}
-            disabled={loading}
-            style={{
-              width: 40, height: 40, borderRadius: 12,
-              background: '#ffffff', border: '1px solid rgba(5,80,60,0.08)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', transition: 'all 0.2s', color: '#05503c',
-            }}
-          >
-            <RefreshCw size={18} className={loading ? 'animate-spin' : ''} style={{ color: 'rgba(5,80,60,0.5)' }} />
-          </button>
         </div>
       </div>
 
@@ -404,10 +409,10 @@ export default function PaymentAdmin() {
                     </div>
 
                     {/* Rejection reason */}
-                    {payment.metadata?.rejection_reason && (
+                    {(payment.metadata?.rejection_reason || payment.metadata?.reason) && (
                       <div style={{ background: 'rgba(225,29,72,0.04)', border: '1px solid rgba(225,29,72,0.1)', borderRadius: 12, padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
                         <XCircle size={16} color="#e11d48" style={{ marginTop: 2, flexShrink: 0 }} />
-                        <span style={{ fontSize: '0.82rem', color: '#e11d48', fontWeight: 600 }}>{payment.metadata.rejection_reason}</span>
+                        <span style={{ fontSize: '0.82rem', color: '#e11d48', fontWeight: 600 }}>{payment.metadata.rejection_reason || payment.metadata.reason}</span>
                       </div>
                     )}
 
@@ -444,17 +449,17 @@ export default function PaymentAdmin() {
                               fontFamily: 'var(--font-bricolage)',
                             }}
                           >
-                            {actionLoading === payment.id ? <RefreshCw size={15} className="animate-spin" /> : <Printer size={15} />}
-                            Approve & Print Receipt
+                            {actionLoading === payment.id ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
+                            Approve & Save Receipt
                           </button>
                         </>
                       )}
                       {payment.status === 'approved' && (
                         <button
-                          onClick={() => {
-                            setPrintData({ order: { id: payment.session_id?.toString() || '', items: [] }, payment });
-                            setTimeout(() => { window.print(); setPrintData(null); }, 500);
-                          }}
+                          onClick={() => downloadReceipt(
+                            { id: payment.session_id?.toString() || '', items: [] },
+                            payment
+                          )}
                           style={{
                             padding: '0.65rem 1.25rem', borderRadius: 12,
                             border: '1px solid rgba(5,80,60,0.08)', background: '#ffffff',
@@ -463,7 +468,7 @@ export default function PaymentAdmin() {
                             display: 'flex', alignItems: 'center', gap: '0.4rem',
                           }}
                         >
-                          <Printer size={15} /> Re-print Receipt
+                          <Download size={15} /> Download Receipt
                         </button>
                       )}
                     </div>
@@ -475,9 +480,18 @@ export default function PaymentAdmin() {
         )}
       </div>
 
-      {/* Hidden Receipt for Printing */}
+      {/* Off-screen receipt container — captured by html2canvas, never visible to users */}
       {printData && (
-        <div className="hidden print:block">
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            top: '-9999px',
+            left: '-9999px',
+            zIndex: -1,
+            pointerEvents: 'none',
+          }}
+        >
           <ReceiptTemplate order={printData.order} payment={printData.payment} />
         </div>
       )}

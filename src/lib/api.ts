@@ -7,7 +7,7 @@ interface ApiResponse<T = any> {
 }
 
 // Response types (kept from original)
-export interface LoginResponse {
+interface LoginResponse {
   success: boolean;
   token: string;
   user: {
@@ -18,7 +18,7 @@ export interface LoginResponse {
   };
 }
 
-export interface SessionResponse {
+interface SessionResponse {
   session_id: number;
   session_token: string;
   table_id: number;
@@ -26,7 +26,7 @@ export interface SessionResponse {
   message: string;
 }
 
-export interface SessionDetail {
+interface SessionDetail {
   id: number;
   table_id: number;
   table_number: number;
@@ -36,13 +36,13 @@ export interface SessionDetail {
   orders?: any[];
 }
 
-export interface OrderResponse {
+interface OrderResponse {
   success: boolean;
   order: any;
   message: string;
 }
 
-export interface PaymentResponse {
+interface PaymentResponse {
   success: boolean;
   payment: {
     subtotal: number;
@@ -245,6 +245,7 @@ export const orderAPI = {
           data: res.data.map((o: any) => ({
             ...o,
             table_number: o.sessions?.tables?.number,
+            fulfillment_type: o.fulfillment_type || 'pay_later',
             items: o.order_items.map((oi: any) => ({
               ...oi,
               name: oi.menu_items?.name
@@ -254,6 +255,64 @@ export const orderAPI = {
       }
       return res;
     }));
+  },
+  /**
+   * Kitchen-specific order fetching: 
+   * Shows pay_later orders immediately, pay_first orders only after payment is verified.
+   */
+  getKitchenOrders: async () => {
+    // Fetch all non-served, non-cancelled orders
+    const res = await handleSupabase(
+      supabase.from('orders')
+        .select('*, sessions(tables(number)), order_items(*, menu_items(name))')
+        .in('status', ['pending', 'preparing', 'ready'])
+        .order('placed_at', { ascending: false })
+        .then((res: any) => {
+          if (res.data) {
+            return {
+              ...res,
+              data: res.data.map((o: any) => ({
+                ...o,
+                table_number: o.sessions?.tables?.number,
+                fulfillment_type: o.fulfillment_type || 'pay_later',
+                items: o.order_items.map((oi: any) => ({
+                  ...oi,
+                  name: oi.menu_items?.name
+                }))
+              }))
+            };
+          }
+          return res;
+        })
+    );
+
+    if (res.data && Array.isArray(res.data)) {
+      // Filter: pay_later shows always, pay_first only if payment is verified/approved
+      const filteredOrders: any[] = [];
+      
+      for (const order of res.data) {
+        if (order.fulfillment_type === 'pay_later') {
+          filteredOrders.push(order);
+        } else if (order.fulfillment_type === 'pay_first') {
+          // Check if session has a verified/approved payment
+          const { data: payments } = await supabase
+            .from('payments')
+            .select('status')
+            .eq('session_id', order.session_id)
+            .in('status', ['verified', 'approved'])
+            .limit(1);
+          
+          if (payments && payments.length > 0) {
+            filteredOrders.push({ ...order, payment_verified: true });
+          }
+          // If no verified payment, this order is hidden from kitchen
+        }
+      }
+
+      return { data: filteredOrders };
+    }
+
+    return res;
   },
   getSessionOrders: (sessionId: number): Promise<ApiResponse<any[]>> =>
     handleSupabase(
@@ -472,4 +531,11 @@ export const adminAPI = {
     handleSupabase(supabase.from('tables').delete().eq('id', id)),
   getAppSettings: () =>
     handleSupabase(supabase.from('app_settings').select('*')),
+  getAuditLogs: () =>
+    handleSupabase(
+      supabase.from('admin_audit_logs')
+        .select('*, admin_users(full_name, username)')
+        .order('created_at', { ascending: false })
+        .limit(100)
+    ),
 };

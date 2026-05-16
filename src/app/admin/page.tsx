@@ -6,7 +6,8 @@ import Link from 'next/link';
 import {
   LogOut, RefreshCw, DollarSign, ShoppingBag, Users,
   CheckCircle, ChefHat, LayoutGrid, Menu, X, TrendingUp,
-  Coffee, Circle, ArrowRight, Plus, Edit2, Trash2, Save, Upload, Image as ImageIcon, Download, Mail, CreditCard
+  Coffee, Circle, ArrowRight, Plus, Edit2, Trash2, Save, Upload, Image as ImageIcon, Download, Mail, CreditCard, XCircle, FileText,
+  Zap, AlertTriangle
 } from 'lucide-react';
 import gsap from 'gsap';
 import { Draggable } from 'gsap/all';
@@ -16,6 +17,15 @@ import { supabase } from '@/lib/supabase';
 import { polling } from '@/lib/polling';
 import * as actions from './actions';
 import PaymentAdmin from './components/PaymentAdmin';
+import { useDialog } from '@/components/ui/ConfirmDialog';
+import {
+  playNewOrder,
+  playPaymentReceived,
+  playSuccess,
+  playError,
+  requestNotificationPermission,
+  showNotification,
+} from '@/lib/sounds';
 
 if (typeof window !== 'undefined') {
   gsap.registerPlugin(Draggable);
@@ -30,6 +40,7 @@ const NAV_ITEMS = [
   { id: 'menu', label: 'Menu', short: 'Menu', icon: Coffee, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'payments', label: 'Payments', short: 'Payments', icon: CreditCard, roles: ['super_admin', 'manager', 'admin'] },
   { id: 'admins', label: 'Admins', short: 'Admins', icon: Users, roles: ['super_admin', 'admin'] },
+  { id: 'audit', label: 'Audit / Recon', short: 'Audit', icon: FileText, roles: ['super_admin', 'manager', 'admin'] },
 ] as const;
 
 type TabId = (typeof NAV_ITEMS)[number]['id'];
@@ -75,10 +86,14 @@ const ROLE_STYLES: Record<string, { bg: string; border: string; text: string; la
 export default function AdminDashboard() {
   const router = useRouter();
   const ticketRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const prevOrderIds = useRef<Set<number>>(new Set());
   const { isAuthenticated, user, orders, setOrders, updateOrderStatus, logout, setAuth } = useAdminStore();
+  const dialog = useDialog();
+  const [adminToast, setAdminToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   const [sessions, setSessions] = useState<any[]>([]);
   const [report, setReport] = useState<any>(null);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [menuItems, setMenuItems] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
   const [loading, setLoading] = useState(true);
@@ -147,6 +162,15 @@ export default function AdminDashboard() {
   const [tableActionLoading, setTableActionLoading] = useState<number | null>(null);
   const [adminSaving, setAdminSaving] = useState(false);
   const [resettingData, setResettingData] = useState(false);
+  const [bulkCloseLoading, setBulkCloseLoading] = useState(false);
+
+  // Audit & Reconciliation filters
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditActionFilter, setAuditActionFilter] = useState('all');
+  const [auditExpandedRow, setAuditExpandedRow] = useState<number | null>(null);
+
+  // Quick price edit: maps item.id -> { draft: string, saving: bool }
+  const [quickPriceEdit, setQuickPriceEdit] = useState<Record<number, { draft: string; saving: boolean }>>({});
 
   const [isClient, setIsClient] = useState(false);
   const [currentDate, setCurrentDate] = useState('');
@@ -200,11 +224,21 @@ export default function AdminDashboard() {
     // ── Real-time Subscriptions ────────────────────────────────
     const ordersSub = supabase
       .channel('orders-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload: any) => {
         loadOrders();
         loadDashboard();
         loadSessions(); // Orders affect session totals
         loadTables();   // Ensure table cards show new orders/totals
+
+        // Play sound only for new INSERT events
+        if (payload.eventType === 'INSERT') {
+          const newId: number = payload.new?.id;
+          if (newId && !prevOrderIds.current.has(newId)) {
+            prevOrderIds.current.add(newId);
+            playNewOrder();
+            showNotification('New Order!', `Order #${String(newId).slice(-4)} received from Table ${payload.new?.session_id ?? '?'}.`);
+          }
+        }
       })
       .subscribe();
 
@@ -226,10 +260,37 @@ export default function AdminDashboard() {
       })
       .subscribe();
 
+    const paymentsSub = supabase
+      .channel('payments-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, (payload: any) => {
+        loadOrders();   // Trigger kitchen board updates for 'Pay First' orders
+        loadSessions(); // Trigger session accounting updates
+        loadTables();   // Trigger table card payment status updates
+
+        // Notify admin of newly submitted payments awaiting verification
+        if (payload.eventType === 'UPDATE' && payload.new?.status === 'verified') {
+          playPaymentReceived();
+          showNotification('Payment Pending Review', `A customer submitted a payment code. Please verify it.`);
+        }
+      })
+      .subscribe();
+
+    const auditSub = supabase
+      .channel('audit-logs-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'admin_audit_logs' }, () => {
+        loadAuditLogs();
+      })
+      .subscribe();
+
+    // Request notification permission once admin is logged in
+    requestNotificationPermission();
+
     return () => {
       ordersSub.unsubscribe();
       sessionsSub.unsubscribe();
       tablesSub.unsubscribe();
+      paymentsSub.unsubscribe();
+      auditSub.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -274,6 +335,7 @@ export default function AdminDashboard() {
     await loadMenu();
     await loadDashboard();
     await loadAdminUsers();
+    await loadAuditLogs();
 
     setLoading(false);
   };
@@ -295,7 +357,15 @@ export default function AdminDashboard() {
     }
   }, [loading, isClient]);
 
-  const loadOrders = async () => { const { data } = await orderAPI.getAll(); if (data && Array.isArray(data)) setOrders(data); };
+  const loadOrders = async () => { 
+    if (activeTab === 'kitchen') {
+      const { data } = await orderAPI.getKitchenOrders(); 
+      if (data && Array.isArray(data)) setOrders(data); 
+    } else {
+      const { data } = await orderAPI.getAll(); 
+      if (data && Array.isArray(data)) setOrders(data); 
+    }
+  };
   const loadSessions = async () => { const { data } = await adminAPI.getSessions(); if (data && Array.isArray(data)) setSessions(data); };
   const loadTables = async () => {
     const { data } = await adminAPI.getTables();
@@ -353,6 +423,17 @@ export default function AdminDashboard() {
     if (data && Array.isArray(data)) setAdminUsers(data);
   };
 
+  const loadAuditLogs = async () => {
+    const storedUser = localStorage.getItem('admin_user');
+    if (!storedUser) return;
+    try {
+      const userData = JSON.parse(storedUser);
+      if (userData?.role === 'kitchen') return;
+    } catch (err) {}
+    const { data } = await adminAPI.getAuditLogs();
+    if (data && Array.isArray(data)) setAuditLogs(data);
+  };
+
   const handleLogout = async () => {
     await adminAPI.logout();
     logout();
@@ -362,8 +443,13 @@ export default function AdminDashboard() {
   const handleStatusChange = async (orderId: number, status: string) => {
     const token = await getFreshToken();
     const { error } = await actions.updateOrderStatus(orderId, status, token);
-    if (!error) updateOrderStatus(orderId, status);
-    else alert('Failed to update status: ' + error);
+    if (!error) {
+      updateOrderStatus(orderId, status);
+      playSuccess();
+    } else {
+      setAdminToast({ message: 'Failed to update status: ' + error, type: 'error' });
+      playError();
+    }
   };
 
   const handleSwipeTicket = (orderId: number, direction: 'left' | 'right') => {
@@ -382,7 +468,7 @@ export default function AdminDashboard() {
     const token = await getFreshToken();
     const { error } = await actions.toggleMenuItemAvailability(itemId, !cur, token);
     if (!error) setMenuItems(items => items.map(i => i.id === itemId ? { ...i, is_available: !cur } : i));
-    else alert('Failed to update availability: ' + error);
+    else setAdminToast({ message: 'Failed to update availability: ' + error, type: 'error' });
   };
 
   const handlePayment = async (sessionId: number, method: string = 'cash') => {
@@ -401,7 +487,12 @@ export default function AdminDashboard() {
     const s = sub * 0.10;
     const tot = sub + v + s;
 
-    if (!confirm(`Confirm ${method} payment?\n\nSubtotal: ${sub.toFixed(0)} ETB\nVAT (15%): ${v.toFixed(0)} ETB\nService (10%): ${s.toFixed(0)} ETB\nTotal: ${tot.toFixed(0)} ETB`)) return;
+    const confirmed = await dialog.showConfirm(
+      `Confirm ${method.charAt(0).toUpperCase() + method.slice(1)} Payment`,
+      `Subtotal: ${sub.toFixed(0)} ETB\nVAT (15%): ${v.toFixed(0)} ETB\nService (10%): ${s.toFixed(0)} ETB\nTotal: ${tot.toFixed(0)} ETB`,
+      { confirmLabel: 'Confirm Payment' }
+    );
+    if (!confirmed) return;
 
     const token = await getFreshToken();
     const { data, error } = await actions.confirmPaymentAction(sessionId, method, token);
@@ -409,8 +500,11 @@ export default function AdminDashboard() {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
       loadTables(); loadSessions(); loadReport(); loadDashboard();
+      playSuccess();
+      setAdminToast({ message: 'Payment confirmed successfully!', type: 'success' });
     } else {
-      alert('Payment failed: ' + (error || 'Unknown error'));
+      playError();
+      setAdminToast({ message: 'Payment failed: ' + (error || 'Unknown error'), type: 'error' });
     }
   };
 
@@ -427,32 +521,111 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleCancelSession = async (sessionId: number, tableNumber: number) => {
-    if (!confirm(`Cancel session for Table ${tableNumber}? All orders will be voided.`)) return;
+  /**
+   * EMERGENCY: Close every open session at once, then download a JSON snapshot
+   * so the manager can settle bills manually after a power/Wi-Fi outage.
+   */
+  const handleBulkClose = async () => {
+    const occupiedCount = tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length;
+    if (occupiedCount === 0) {
+      setAdminToast({ message: 'No open sessions to close.', type: 'info' });
+      return;
+    }
+
+    const confirmed = await dialog.showDestructive(
+      '⚡ Emergency: Close All Sessions',
+      `This will immediately cancel all ${occupiedCount} active session(s) and release every table.\n\nA JSON snapshot will be downloaded so you can manually settle bills offline.\n\nProceed?`,
+      { confirmLabel: `Close All ${occupiedCount} Session(s)` }
+    );
+    if (!confirmed) return;
+
+    const reason = await dialog.showPrompt(
+      'Reason for Emergency Close',
+      'Please enter a reason (e.g. "Power outage", "End of shift"):',
+      { confirmLabel: 'Confirm & Close All', placeholder: 'Reason (required)' }
+    );
+    if (!reason || reason.trim() === '') {
+      if (reason !== null) setAdminToast({ message: 'A reason is required.', type: 'error' });
+      return;
+    }
+
+    setBulkCloseLoading(true);
     const token = await getFreshToken();
-    const { error } = await actions.cancelSessionAction(sessionId, token);
+    const result = await actions.bulkCloseSessionsAction(reason.trim(), token);
+    setBulkCloseLoading(false);
+
+    if (result.error) {
+      setAdminToast({ message: 'Bulk close failed: ' + result.error, type: 'error' });
+      return;
+    }
+
+    // Download snapshot as JSON
+    if (result.exportedSnapshot && result.exportedSnapshot.length > 0) {
+      const blob = new Blob(
+        [JSON.stringify(result.exportedSnapshot, null, 2)],
+        { type: 'application/json' }
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `eset-sessions-snapshot-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    loadTables();
+    loadSessions();
+    loadDashboard();
+    setExpandedTable(null);
+    setSessionOrders({});
+    setAdminToast({
+      message: `Closed ${result.closed} session(s).${result.failed ? ` ${result.failed} failed.` : ''} Snapshot downloaded.`,
+      type: result.failed ? 'error' : 'success'
+    });
+  };
+
+  const handleCancelSession = async (sessionId: number, tableNumber: number) => {
+    const reason = await dialog.showPrompt(
+      'Cancel Session',
+      `Cancel session for Table ${tableNumber}? All pending and preparing orders will be voided.\nPlease provide a reason for cancellation:`,
+      { confirmLabel: 'Cancel Session', placeholder: 'Reason (required)' }
+    );
+    if (!reason || reason.trim() === '') {
+      if (reason !== null) setAdminToast({ message: 'Cancellation reason is required.', type: 'error' });
+      return;
+    }
+    const token = await getFreshToken();
+    const { error } = await actions.cancelSessionAction(sessionId, token, reason);
     if (!error) {
       setExpandedTable(null);
       setSessionOrders(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
       loadTables(); loadSessions();
+      setAdminToast({ message: `Session for Table ${tableNumber} cancelled.`, type: 'info' });
     } else {
-      alert('Failed to cancel session: ' + error);
+      setAdminToast({ message: 'Failed to cancel session: ' + error, type: 'error' });
     }
   };
 
   const handleResetDashboard = async () => {
-    if (!user || (user.role !== 'super_admin' && user.role !== 'manager' && user.role !== 'admin')) {
-      alert('You do not have permission to perform this action.');
+    if (!user || user.role !== 'super_admin') {
+      await dialog.showAlert('Permission Denied', 'You do not have permission to perform this action. Only Super Admins can reset the dashboard.');
       return;
     }
 
-    if (!confirm('CRITICAL WARNING: This will permanently DELETE all sales history, order history, and active sessions. This cannot be undone.\n\nAre you absolutely sure you want to reset the dashboard?')) {
-      return;
-    }
+    const firstConfirm = await dialog.showDestructive(
+      'Reset Dashboard Data',
+      'CRITICAL WARNING: This will permanently DELETE all sales history, order history, and active sessions. This cannot be undone.\n\nAre you absolutely sure?',
+      { confirmLabel: 'I Understand, Continue' }
+    );
+    if (!firstConfirm) return;
 
-    const secondConfirm = prompt('Please type "RESET" to confirm data deletion:');
+    const secondConfirm = await dialog.showPrompt(
+      'Final Confirmation',
+      'Please type "RESET" to confirm data deletion.',
+      { placeholder: 'Type RESET here', requiredMatch: 'RESET', confirmLabel: 'Reset Everything' }
+    );
     if (secondConfirm !== 'RESET') {
-      alert('Reset cancelled.');
+      setAdminToast({ message: 'Reset cancelled.', type: 'info' });
       return;
     }
 
@@ -462,10 +635,10 @@ export default function AdminDashboard() {
     setResettingData(false);
 
     if (success) {
-      alert('Dashboard data has been reset successfully.');
+      setAdminToast({ message: 'Dashboard data has been reset successfully.', type: 'success' });
       await loadData();
     } else {
-      alert('Failed to reset dashboard: ' + error);
+      setAdminToast({ message: 'Failed to reset dashboard: ' + error, type: 'error' });
     }
   };
 
@@ -522,13 +695,13 @@ export default function AdminDashboard() {
 
     // Validate file type
     if (!file.type.startsWith('image/')) {
-      alert('Please select an image file');
+      setAdminToast({ message: 'Please select an image file', type: 'error' });
       return;
     }
 
     // Validate file size (5MB)
     if (file.size > 5 * 1024 * 1024) {
-      alert('Image must be less than 5MB');
+      setAdminToast({ message: 'Image must be less than 5MB', type: 'error' });
       return;
     }
 
@@ -546,7 +719,7 @@ export default function AdminDashboard() {
     setUploadingImage(false);
 
     if (error) {
-      alert('Failed to upload image: ' + error);
+      setAdminToast({ message: 'Failed to upload image: ' + error, type: 'error' });
       setImagePreview(null);
       return;
     }
@@ -571,18 +744,18 @@ export default function AdminDashboard() {
 
   const handleSaveMenuItem = async () => {
     if (!menuForm.name || !menuForm.description || !menuForm.price) {
-      alert('Please fill in all required fields');
+      setAdminToast({ message: 'Please fill in all required fields (Name, Description, Price).', type: 'error' });
       return;
     }
 
     if (!menuForm.name || !menuForm.price) {
-      alert('Name and Price are required');
+      setAdminToast({ message: 'Name and Price are required.', type: 'error' });
       return;
     }
 
     const priceNum = parseFloat(menuForm.price);
     if (isNaN(priceNum)) {
-      alert('Price must be a valid number');
+      setAdminToast({ message: 'Price must be a valid number.', type: 'error' });
       return;
     }
 
@@ -606,7 +779,7 @@ export default function AdminDashboard() {
         handleCloseMenuModal();
       } else {
         console.error('Update result: Error', result.error);
-        alert('Failed to update menu item: ' + result.error);
+        setAdminToast({ message: 'Failed to update menu item: ' + result.error, type: 'error' });
       }
     } else {
       const token = await getFreshToken();
@@ -617,22 +790,28 @@ export default function AdminDashboard() {
         handleCloseMenuModal();
       } else {
         console.error('Create result: Error', result.error);
-        alert('Failed to create menu item: ' + result.error);
+        setAdminToast({ message: 'Failed to create menu item: ' + result.error, type: 'error' });
       }
     }
   };
 
   const handleDeleteMenuItem = async (id: number) => {
     console.log('Attempting to delete menu item:', id);
-    if (!confirm('Are you sure you want to delete this menu item? This cannot be undone.')) return;
+    const confirmed = await dialog.showDestructive(
+      'Delete Menu Item',
+      'Are you sure you want to delete this menu item? This cannot be undone.',
+      { confirmLabel: 'Delete Item' }
+    );
+    if (!confirmed) return;
 
     const token = await getFreshToken();
     const { error } = await actions.deleteMenuItem(id, token);
     console.log('Menu delete result:', { error });
     if (!error) {
       loadMenu();
+      setAdminToast({ message: 'Menu item deleted.', type: 'success' });
     } else {
-      alert('Failed to delete menu item: ' + error);
+      setAdminToast({ message: 'Failed to delete menu item: ' + error, type: 'error' });
     }
   };
 
@@ -665,11 +844,11 @@ export default function AdminDashboard() {
 
   const handleSaveAdmin = async () => {
     if (!adminForm.username) {
-      alert('Username is required');
+      setAdminToast({ message: 'Username is required.', type: 'error' });
       return;
     }
     if (!editingAdmin && !adminForm.password) {
-      alert('Password is required for new users');
+      setAdminToast({ message: 'Password is required for new users.', type: 'error' });
       return;
     }
     setAdminSaving(true);
@@ -680,11 +859,12 @@ export default function AdminDashboard() {
       if (!error) {
         await loadAdminUsers();
         handleCloseAdminModal();
+        setAdminToast({ message: 'Admin user updated.', type: 'success' });
       } else {
         if (error.includes('23505')) {
-          alert('This username/email is already taken by another admin.');
+          setAdminToast({ message: 'This username/email is already taken by another admin.', type: 'error' });
         } else {
-          alert('Failed to update admin: ' + error);
+          setAdminToast({ message: 'Failed to update admin: ' + error, type: 'error' });
         }
       }
     } else {
@@ -694,11 +874,12 @@ export default function AdminDashboard() {
       if (!error) {
         await loadAdminUsers();
         handleCloseAdminModal();
+        setAdminToast({ message: 'Admin user created.', type: 'success' });
       } else {
         if (error.includes('23505')) {
-          alert('This username/email is already taken by another admin.');
+          setAdminToast({ message: 'This username/email is already taken by another admin.', type: 'error' });
         } else {
-          alert('Failed to create admin: ' + error);
+          setAdminToast({ message: 'Failed to create admin: ' + error, type: 'error' });
         }
       }
     }
@@ -707,24 +888,30 @@ export default function AdminDashboard() {
   const handleDeleteAdmin = async (id: string, username: string) => {
     console.log('Attempting to delete admin:', { id, username });
     if (username === user?.username) {
-      alert('You cannot delete your own account');
+      await dialog.showAlert('Cannot Delete', 'You cannot delete your own account.');
       return;
     }
-    if (!confirm(`Delete admin user "${username}"? This cannot be undone.`)) return;
+    const confirmed = await dialog.showDestructive(
+      'Delete Admin User',
+      `Delete admin user "${username}"? This cannot be undone.`,
+      { confirmLabel: 'Delete User' }
+    );
+    if (!confirmed) return;
     const token = await getFreshToken();
     const { error } = await actions.deleteAdminAction(id, token);
     console.log('Admin delete result:', { error });
     if (!error) {
       await loadAdminUsers();
+      setAdminToast({ message: `Admin "${username}" deleted.`, type: 'success' });
     } else {
-      alert('Failed to delete admin user: ' + error);
+      setAdminToast({ message: 'Failed to delete admin user: ' + error, type: 'error' });
     }
   };
 
   // Table management handlers
   const handleAddTable = async () => {
     const num = parseInt(newTableNumber);
-    if (!num || num < 1) { alert('Enter a valid table number'); return; }
+    if (!num || num < 1) { setAdminToast({ message: 'Enter a valid table number.', type: 'error' }); return; }
     setTableActionLoading(-1);
     const token = await getFreshToken();
     const { data, error } = await actions.createTableAction(num, token);
@@ -733,15 +920,24 @@ export default function AdminDashboard() {
       setNewTableNumber('');
       setAddingTable(false);
       await loadTables();
+      setAdminToast({ message: `Table ${num} added.`, type: 'success' });
     } else {
-      alert('Failed to add table: ' + error);
+      setAdminToast({ message: 'Failed to add table: ' + error, type: 'error' });
     }
   };
 
   const handleDeleteTable = async (tableId: number, tableNumber: number, status: string) => {
     console.log('Attempting to delete table:', { tableId, tableNumber });
-    if (status === 'occupied') { alert('Cannot delete an occupied table.'); return; }
-    if (!confirm(`Delete Table ${tableNumber}? This cannot be undone.`)) return;
+    if (status === 'occupied') {
+      await dialog.showAlert('Cannot Delete', 'Cannot delete an occupied table. Cancel the session first.');
+      return;
+    }
+    const confirmed = await dialog.showDestructive(
+      'Delete Table',
+      `Delete Table ${tableNumber}? This cannot be undone.`,
+      { confirmLabel: 'Delete Table' }
+    );
+    if (!confirmed) return;
     setTableActionLoading(tableId);
     const token = await getFreshToken();
     const { error } = await actions.deleteTableAction(tableId, token);
@@ -749,8 +945,9 @@ export default function AdminDashboard() {
     setTableActionLoading(null);
     if (!error) {
       await loadTables();
+      setAdminToast({ message: `Table ${tableNumber} deleted.`, type: 'success' });
     } else {
-      alert('Failed to delete table: ' + error);
+      setAdminToast({ message: 'Failed to delete table: ' + error, type: 'error' });
     }
   };
 
@@ -1412,9 +1609,20 @@ export default function AdminDashboard() {
                                       Order #{order.id}
                                     </p>
                                   </div>
-                                  <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'rgba(5,80,60,0.45)' }}>
-                                    {new Date(order.placed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                  </span>
+                                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.3rem' }}>
+                                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'rgba(5,80,60,0.45)' }}>
+                                      {new Date(order.placed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                    {order.fulfillment_type === 'pay_first' ? (
+                                      <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '0.2rem 0.5rem', background: 'rgba(253,202,0,0.15)', color: '#a16207', borderRadius: 999 }}>
+                                        PAY FIRST (VERIFIED)
+                                      </span>
+                                    ) : (
+                                      <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '0.2rem 0.5rem', background: 'rgba(34,197,94,0.1)', color: '#15803d', borderRadius: 999 }}>
+                                        PAY LATER
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
 
                                 <div style={{ borderTop: '1px solid rgba(5,80,60,0.06)', paddingTop: '0.85rem', marginBottom: '1rem', display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
@@ -1491,6 +1699,53 @@ export default function AdminDashboard() {
                 {/* ════ SESSIONS VIEW ═════════════════════════════ */}
                 {activeTab === 'sessions' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+                    {/* ─── Emergency Bulk Close Banner ─── */}
+                    {tables.filter(t => t.table_status === 'occupied' || !!t.session_id).length > 0 && (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem',
+                        padding: '1rem 1.25rem',
+                        background: 'linear-gradient(135deg, rgba(239,68,68,0.06), rgba(239,68,68,0.03))',
+                        border: '1.5px solid rgba(239,68,68,0.18)',
+                        borderRadius: 18,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                          <div style={{
+                            width: 36, height: 36, borderRadius: 10,
+                            background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                          }}>
+                            <AlertTriangle size={16} style={{ color: '#ef4444' }} />
+                          </div>
+                          <div>
+                            <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.85rem', color: '#ef4444' }}>
+                              Emergency Close
+                            </p>
+                            <p style={{ fontSize: '0.7rem', color: 'rgba(5,80,60,0.45)', marginTop: '0.1rem' }}>
+                              Power out / shift end? Close all sessions instantly and download a billing snapshot.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          id="btn-bulk-close-sessions"
+                          onClick={handleBulkClose}
+                          disabled={bulkCloseLoading}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: '0.5rem',
+                            padding: '0.65rem 1.25rem', borderRadius: 12, border: 'none',
+                            background: bulkCloseLoading ? 'rgba(239,68,68,0.3)' : 'linear-gradient(135deg, #ef4444, #dc2626)',
+                            color: '#fff', cursor: bulkCloseLoading ? 'not-allowed' : 'pointer',
+                            fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.8rem',
+                            boxShadow: '0 4px 16px rgba(239,68,68,0.25)',
+                            transition: 'all 0.2s ease',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <Zap size={14} />
+                          {bulkCloseLoading ? 'Closing…' : 'Close All & Export'}
+                        </button>
+                      </div>
+                    )}
 
                     {/* Summary bar + Add Table */}
                     <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
@@ -1997,7 +2252,114 @@ export default function AdminDashboard() {
                                 )}
                               </p>
                               <p style={{ fontSize: '0.7rem', color: 'rgba(5,80,60,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginTop: '0.15rem' }}>
-                                {item.category} · {Number(item.price).toFixed(0)} ETB
+                                {item.category} ·{
+                                  quickPriceEdit[item.id] ? (
+                                    <span
+                                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', marginLeft: '0.3rem' }}
+                                      onClick={e => e.stopPropagation()}
+                                    >
+                                      <input
+                                        id={`quick-price-${item.id}`}
+                                        type="number"
+                                        min={1}
+                                        step={0.5}
+                                        value={quickPriceEdit[item.id].draft}
+                                        autoFocus
+                                        onChange={e => setQuickPriceEdit(prev => ({ ...prev, [item.id]: { ...prev[item.id], draft: e.target.value } }))}
+                                        onKeyDown={async e => {
+                                          if (e.key === 'Enter') {
+                                            const newP = parseFloat(quickPriceEdit[item.id].draft);
+                                            if (!isNaN(newP) && newP > 0) {
+                                              setQuickPriceEdit(prev => ({ ...prev, [item.id]: { ...prev[item.id], saving: true } }));
+                                              const token = await getFreshToken();
+                                              const { error } = await actions.updateMenuItemPriceAction(item.id, newP, token);
+                                              if (!error) {
+                                                setMenuItems(items => items.map(i => i.id === item.id ? { ...i, price: newP } : i));
+                                                setAdminToast({ message: `Price updated to ${newP} ETB`, type: 'success' });
+                                              } else {
+                                                setAdminToast({ message: 'Failed: ' + error, type: 'error' });
+                                              }
+                                              setQuickPriceEdit(prev => { const n = { ...prev }; delete n[item.id]; return n; });
+                                            }
+                                          }
+                                          if (e.key === 'Escape') {
+                                            setQuickPriceEdit(prev => { const n = { ...prev }; delete n[item.id]; return n; });
+                                          }
+                                        }}
+                                        style={{
+                                          width: 68, padding: '0.1rem 0.4rem', borderRadius: 6,
+                                          border: '1.5px solid rgba(253,202,0,0.6)',
+                                          fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.72rem',
+                                          color: '#05503c', outline: 'none', background: 'rgba(253,202,0,0.08)',
+                                          textTransform: 'none', letterSpacing: 0,
+                                        }}
+                                      />
+                                      <button
+                                        title="Save price"
+                                        disabled={quickPriceEdit[item.id].saving}
+                                        onClick={async e => {
+                                          e.stopPropagation();
+                                          const newP = parseFloat(quickPriceEdit[item.id].draft);
+                                          if (!isNaN(newP) && newP > 0) {
+                                            setQuickPriceEdit(prev => ({ ...prev, [item.id]: { ...prev[item.id], saving: true } }));
+                                            const token = await getFreshToken();
+                                            const { error } = await actions.updateMenuItemPriceAction(item.id, newP, token);
+                                            if (!error) {
+                                              setMenuItems(items => items.map(i => i.id === item.id ? { ...i, price: newP } : i));
+                                              setAdminToast({ message: `Price updated to ${newP} ETB`, type: 'success' });
+                                            } else {
+                                              setAdminToast({ message: 'Failed: ' + error, type: 'error' });
+                                            }
+                                            setQuickPriceEdit(prev => { const n = { ...prev }; delete n[item.id]; return n; });
+                                          }
+                                        }}
+                                        style={{
+                                          width: 22, height: 22, borderRadius: 6, border: 'none',
+                                          background: quickPriceEdit[item.id].saving ? 'rgba(5,80,60,0.3)' : '#05503c',
+                                          color: '#fdca00', cursor: 'pointer',
+                                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                          flexShrink: 0,
+                                        }}
+                                      >
+                                        {quickPriceEdit[item.id].saving ? <RefreshCw size={10} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={10} />}
+                                      </button>
+                                      <button
+                                        title="Cancel"
+                                        onClick={e => { e.stopPropagation(); setQuickPriceEdit(prev => { const n = { ...prev }; delete n[item.id]; return n; }); }}
+                                        style={{
+                                          width: 22, height: 22, borderRadius: 6, border: 'none',
+                                          background: 'rgba(239,68,68,0.1)', color: '#ef4444', cursor: 'pointer',
+                                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                          flexShrink: 0,
+                                        }}
+                                      >
+                                        <X size={10} />
+                                      </button>
+                                    </span>
+                                  ) : (
+                                    <button
+                                      id={`quick-price-trigger-${item.id}`}
+                                      title="Tap to quickly edit price"
+                                      onClick={e => {
+                                        e.stopPropagation();
+                                        setQuickPriceEdit(prev => ({ ...prev, [item.id]: { draft: Number(item.price).toFixed(0), saving: false } }));
+                                      }}
+                                      style={{
+                                        marginLeft: '0.3rem',
+                                        padding: '0.1rem 0.4rem', borderRadius: 6,
+                                        border: '1px dashed rgba(253,202,0,0.5)',
+                                        background: 'rgba(253,202,0,0.06)', color: '#05503c',
+                                        fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.72rem',
+                                        cursor: 'pointer', textTransform: 'none', letterSpacing: 0,
+                                        transition: 'background 0.15s',
+                                      }}
+                                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(253,202,0,0.18)'}
+                                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'rgba(253,202,0,0.06)'}
+                                    >
+                                      {Number(item.price).toFixed(0)} ETB ✎
+                                    </button>
+                                  )
+                                }
                               </p>
                             </div>
                           </div>
@@ -2046,7 +2408,7 @@ export default function AdminDashboard() {
 
                                 {(user?.role === 'super_admin' || user?.role === 'admin') && (
                                   <button
-                                    onClick={() => { alert('Click Menu Delete!'); handleDeleteMenuItem(item.id); }}
+                                    onClick={() => { handleDeleteMenuItem(item.id); }}
                                     style={{
                                       width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                       padding: '0', borderRadius: 10,
@@ -2396,7 +2758,7 @@ export default function AdminDashboard() {
                                         </button>
                                         {(user?.role === 'admin' || user?.role === 'super_admin') && (
                                           <button
-                                            onClick={() => { alert('Click Admin Delete!'); handleDeleteAdmin(admin.id, admin.username); }}
+                                            onClick={() => { handleDeleteAdmin(admin.id, admin.username); }}
                                             style={{
                                               width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                               borderRadius: 10, background: 'rgba(239,68,68,0.05)', border: '1px solid rgba(239,68,68,0.1)',
@@ -2422,7 +2784,228 @@ export default function AdminDashboard() {
                   </div>
                 )}
 
+                {activeTab === 'audit' && (user?.role === 'super_admin' || user?.role === 'manager' || user?.role === 'admin') && (() => {
+                  // ── Derived filtered list ────────────────────────────
+                  const ACTION_CATEGORIES: Record<string, string[]> = {
+                    payments: ['CONFIRM_PAYMENT', 'APPROVE_PAYMENT', 'REJECT_PAYMENT'],
+                    sessions: ['CANCEL_SESSION', 'BULK_CLOSE_SESSIONS'],
+                    menu: ['CREATE_MENU_ITEM', 'UPDATE_MENU_ITEM', 'DELETE_MENU_ITEM', 'ENABLE_MENU_ITEM', 'DISABLE_MENU_ITEM', 'UPDATE_ITEM_PRICE'],
+                    admin: ['CREATE_ADMIN_USER', 'UPDATE_ADMIN_USER', 'DELETE_ADMIN_USER'],
+                    tables: ['CREATE_TABLE', 'DELETE_TABLE'],
+                    system: ['RESET_DASHBOARD'],
+                  };
+                  const filteredLogs = auditLogs.filter((log: any) => {
+                    const matchesSearch = auditSearch === '' ||
+                      (log.admin_users?.full_name || log.admin_users?.username || '').toLowerCase().includes(auditSearch.toLowerCase()) ||
+                      log.action_type.toLowerCase().includes(auditSearch.toLowerCase()) ||
+                      (log.reason || '').toLowerCase().includes(auditSearch.toLowerCase()) ||
+                      (log.entity_type || '').toLowerCase().includes(auditSearch.toLowerCase());
+                    const matchesFilter = auditActionFilter === 'all' || (ACTION_CATEGORIES[auditActionFilter] || []).includes(log.action_type);
+                    return matchesSearch && matchesFilter;
+                  });
+
+                  const getActionStyle = (actionType: string) => {
+                    if (['CANCEL_SESSION','REJECT_PAYMENT','DELETE_MENU_ITEM','DELETE_ADMIN_USER','DELETE_TABLE','RESET_DASHBOARD','BULK_CLOSE_SESSIONS'].includes(actionType))
+                      return { bg: 'rgba(239,68,68,0.1)', color: '#ef4444' };
+                    if (['CONFIRM_PAYMENT','APPROVE_PAYMENT'].includes(actionType))
+                      return { bg: 'rgba(34,197,94,0.12)', color: '#16a34a' };
+                    if (['UPDATE_ITEM_PRICE','UPDATE_MENU_ITEM','UPDATE_ADMIN_USER'].includes(actionType))
+                      return { bg: 'rgba(253,202,0,0.15)', color: '#92700a' };
+                    return { bg: 'rgba(5,80,60,0.08)', color: '#05503c' };
+                  };
+
+                  return (
+                  <div className="af" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                    {/* Header */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '1rem' }}>
+                      <div>
+                        <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.8rem', letterSpacing: '-0.03em', color: '#05503c', marginBottom: '0.4rem' }}>
+                          Audit &amp; Reconciliation
+                        </h2>
+                        <p style={{ fontFamily: 'var(--font-instrument)', fontSize: '0.95rem', color: 'rgba(5,80,60,0.6)' }}>
+                          Complete history of sensitive administrative actions — live updated.
+                        </p>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '0.8rem', fontFamily: 'var(--font-bricolage)', fontWeight: 600, color: 'rgba(5,80,60,0.45)' }}>
+                          {filteredLogs.length} / {auditLogs.length} entries
+                        </span>
+                        <button
+                          onClick={loadAuditLogs}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '0.5rem',
+                            padding: '0.65rem 1.1rem', borderRadius: 12,
+                            background: '#ffffff', border: '1px solid rgba(5,80,60,0.1)',
+                            color: '#05503c', fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.82rem',
+                            cursor: 'pointer', transition: 'all 0.2s',
+                            boxShadow: '0 2px 8px rgba(5,80,60,0.04)'
+                          }}
+                          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(5,80,60,0.04)'; }}
+                          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = '#ffffff'; }}
+                        >
+                          <RefreshCw size={14} /> Refresh
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Search + Filter bar */}
+                    <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                      <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
+                        <input
+                          type="text"
+                          placeholder="Search admin, action, reason…"
+                          value={auditSearch}
+                          onChange={e => setAuditSearch(e.target.value)}
+                          style={{
+                            width: '100%', padding: '0.75rem 1rem 0.75rem 2.75rem',
+                            borderRadius: 14, border: '1px solid rgba(5,80,60,0.12)',
+                            background: '#ffffff', fontSize: '0.9rem',
+                            fontFamily: 'var(--font-instrument)', color: '#05503c',
+                            outline: 'none', boxSizing: 'border-box',
+                            boxShadow: '0 2px 8px rgba(5,80,60,0.04)'
+                          }}
+                        />
+                        <span style={{ position: 'absolute', left: '0.9rem', top: '50%', transform: 'translateY(-50%)', color: 'rgba(5,80,60,0.35)', pointerEvents: 'none', fontSize: '1rem' }}>🔍</span>
+                      </div>
+                      <select
+                        value={auditActionFilter}
+                        onChange={e => setAuditActionFilter(e.target.value)}
+                        style={{
+                          padding: '0.75rem 1rem', borderRadius: 14,
+                          border: '1px solid rgba(5,80,60,0.12)', background: '#ffffff',
+                          fontSize: '0.87rem', fontFamily: 'var(--font-bricolage)', fontWeight: 600,
+                          color: '#05503c', cursor: 'pointer', outline: 'none',
+                          boxShadow: '0 2px 8px rgba(5,80,60,0.04)'
+                        }}
+                      >
+                        <option value="all">All Categories</option>
+                        <option value="payments">💳 Payments</option>
+                        <option value="sessions">🪑 Sessions</option>
+                        <option value="menu">🍽 Menu</option>
+                        <option value="admin">👤 Admin Users</option>
+                        <option value="tables">🗂 Tables</option>
+                        <option value="system">⚙️ System</option>
+                      </select>
+                    </div>
+
+                    {/* Log table */}
+                    <div style={{ background: '#ffffff', borderRadius: 24, border: '1px solid rgba(5,80,60,0.08)', overflow: 'hidden', boxShadow: '0 8px 32px rgba(5,80,60,0.04)' }}>
+                      {filteredLogs.length === 0 ? (
+                        <div style={{ padding: '4rem 2rem', textAlign: 'center' }}>
+                          <div style={{ width: 64, height: 64, borderRadius: 20, background: 'rgba(5,80,60,0.04)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1rem' }}>
+                            <FileText size={24} style={{ color: 'rgba(5,80,60,0.3)' }} />
+                          </div>
+                          <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '1.1rem', color: '#05503c', marginBottom: '0.25rem' }}>
+                            {auditLogs.length === 0 ? 'No Audit Logs Found' : 'No Results Match Your Filter'}
+                          </p>
+                          <p style={{ fontSize: '0.9rem', color: 'rgba(5,80,60,0.5)' }}>
+                            {auditLogs.length === 0 ? 'System actions will appear here once performed.' : 'Try adjusting your search or category filter.'}
+                          </p>
+                        </div>
+                      ) : (
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                            <thead>
+                              <tr style={{ background: 'rgba(5,80,60,0.02)', borderBottom: '1px solid rgba(5,80,60,0.08)' }}>
+                                {['Timestamp','Admin','Action','Entity','Details'].map(h => (
+                                  <th key={h} style={{ padding: '1.1rem 1.25rem', fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.75rem', letterSpacing: '0.06em', textTransform: 'uppercase', color: 'rgba(5,80,60,0.45)', whiteSpace: 'nowrap' }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredLogs.map((log: any) => {
+                                const style = getActionStyle(log.action_type);
+                                const isExpanded = auditExpandedRow === log.id;
+                                // Build a readable snapshot summary
+                                const snap = log.snapshot || {};
+                                const snapLines = Object.entries(snap).map(([k, v]) => `${k.replace(/_/g,' ')}: ${v}`);
+                                return (
+                                  <>
+                                    <tr
+                                      key={log.id}
+                                      onClick={() => setAuditExpandedRow(isExpanded ? null : log.id)}
+                                      style={{
+                                        borderBottom: isExpanded ? 'none' : '1px solid rgba(5,80,60,0.05)',
+                                        cursor: 'pointer',
+                                        background: isExpanded ? 'rgba(5,80,60,0.015)' : 'transparent',
+                                        transition: 'background 0.15s'
+                                      }}
+                                      onMouseEnter={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = 'rgba(5,80,60,0.02)'; }}
+                                      onMouseLeave={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                                    >
+                                      <td style={{ padding: '1rem 1.25rem', fontSize: '0.82rem', color: 'rgba(5,80,60,0.6)', whiteSpace: 'nowrap' }}>
+                                        {new Date(log.created_at).toLocaleString()}
+                                      </td>
+                                      <td style={{ padding: '1rem 1.25rem', fontFamily: 'var(--font-bricolage)', fontWeight: 600, fontSize: '0.88rem', color: '#05503c', whiteSpace: 'nowrap' }}>
+                                        {log.admin_users?.full_name || log.admin_users?.username || 'Unknown'}
+                                      </td>
+                                      <td style={{ padding: '1rem 1.25rem' }}>
+                                        <span style={{
+                                          display: 'inline-block', padding: '0.3rem 0.65rem', borderRadius: 8,
+                                          background: style.bg, color: style.color,
+                                          fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.72rem', letterSpacing: '0.04em',
+                                          whiteSpace: 'nowrap'
+                                        }}>
+                                          {log.action_type}
+                                        </span>
+                                      </td>
+                                      <td style={{ padding: '1rem 1.25rem', fontSize: '0.83rem', color: 'rgba(5,80,60,0.65)', whiteSpace: 'nowrap' }}>
+                                        <span style={{ fontWeight: 600, textTransform: 'capitalize' }}>{log.entity_type}</span> #{log.entity_id}
+                                      </td>
+                                      <td style={{ padding: '1rem 1.25rem', fontSize: '0.83rem', color: 'rgba(5,80,60,0.65)', maxWidth: 280 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>
+                                            {log.reason || snapLines[0] || '—'}
+                                          </span>
+                                          {(snapLines.length > 0 || log.reason) && (
+                                            <span style={{ fontSize: '0.7rem', color: 'rgba(5,80,60,0.35)', flexShrink: 0 }}>
+                                              {isExpanded ? '▲' : '▼'}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                    {isExpanded && (
+                                      <tr key={`${log.id}-detail`} style={{ borderBottom: '1px solid rgba(5,80,60,0.05)', background: 'rgba(5,80,60,0.015)' }}>
+                                        <td colSpan={5} style={{ padding: '0 1.25rem 1.25rem 1.25rem' }}>
+                                          <div style={{
+                                            background: 'rgba(5,80,60,0.04)', borderRadius: 12,
+                                            padding: '1rem 1.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem'
+                                          }}>
+                                            {log.reason && (
+                                              <div style={{ fontSize: '0.83rem', color: '#05503c' }}>
+                                                <span style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 700 }}>Reason: </span>{log.reason}
+                                              </div>
+                                            )}
+                                            {snapLines.length > 0 && (
+                                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: log.reason ? '0.25rem' : 0 }}>
+                                                {snapLines.map((line, i) => (
+                                                  <span key={i} style={{
+                                                    padding: '0.25rem 0.65rem', borderRadius: 8,
+                                                    background: '#ffffff', border: '1px solid rgba(5,80,60,0.1)',
+                                                    fontSize: '0.78rem', color: 'rgba(5,80,60,0.75)',
+                                                    fontFamily: 'var(--font-instrument)'
+                                                  }}>{line}</span>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  );
+                })()}
               </div>
+
             )}
           </div>
         </main>
@@ -3147,6 +3730,32 @@ export default function AdminDashboard() {
           }
         }
       `}</style>
+      {/* Admin Toast Notification System */}
+      {adminToast && (
+        <div 
+          style={{
+            position: 'fixed', bottom: '5.5rem', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 9999, padding: '1rem 1.5rem', borderRadius: '1.25rem',
+            background: adminToast.type === 'error' ? '#ef4444' : adminToast.type === 'success' ? '#05503c' : '#ffffff',
+            color: adminToast.type === 'info' ? '#05503c' : '#ffffff',
+            boxShadow: '0 15px 50px rgba(0,0,0,0.15)',
+            display: 'flex', alignItems: 'center', gap: '0.75rem',
+            animation: 'slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+            fontFamily: 'var(--font-bricolage)', fontWeight: 700, fontSize: '0.9rem',
+            minWidth: '280px', pointerEvents: 'auto',
+            border: adminToast.type === 'info' ? '1px solid rgba(5,80,60,0.1)' : 'none'
+          }}
+          onClick={() => setAdminToast(null)}
+        >
+          {adminToast.type === 'error' ? <XCircle size={20} /> : adminToast.type === 'success' ? <CheckCircle size={20} /> : <div style={{ color: '#fdca00' }}><CheckCircle size={20} /></div>}
+          {adminToast.message}
+          <style>{`
+            @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+          `}</style>
+          {/* Auto-dismiss after 4s */}
+          {setTimeout(() => setAdminToast(null), 4000) && null}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, Suspense, useMemo } from 'react';
+import { useEffect, useState, Suspense, useMemo, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { ShoppingCart, X, Plus, Minus, Coffee, Search, ArrowRight, User, CheckCircle, ChefHat, Clock, Bell, Utensils, XCircle } from 'lucide-react';
@@ -9,10 +9,22 @@ import useSWR from 'swr';
 import { useTabStore, MenuItem } from '@/store/tabStore';
 import { menuAPI, sessionAPI, orderAPI, adminAPI } from '@/lib/api';
 import { startManualSessionAction, placeOrderAction } from '@/app/admin/actions';
-import { initiatePaymentAction } from './actions';
+import { initiatePaymentAction, getSessionSummaryAction } from './actions';
 import { useAdminStore } from '@/store/adminStore';
 import { CreditCard } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
+import { useDialog } from '@/components/ui/ConfirmDialog';
+import {
+  playCartAdd,
+  playOrderPlaced,
+  playOrderReady,
+  playPaymentSuccess,
+  playError,
+  playSuccess,
+  requestNotificationPermission,
+  showNotification,
+} from '@/lib/sounds';
 
 function MenuContent() {
   const searchParams = useSearchParams();
@@ -37,6 +49,9 @@ function MenuContent() {
   const [activeOrders, setActiveOrders] = useState<any[]>([]);
   const [showTracker, setShowTracker] = useState(false);
   const [selectedItem, setSelectedItem] = useState<any | null>(null);
+  const [sessionCancelled, setSessionCancelled] = useState(false);
+  const [orderNote, setOrderNote] = useState('');
+  const dialog = useDialog();
 
   const {
     sessionId,
@@ -50,6 +65,13 @@ function MenuContent() {
     clearCart,
     getCartTotal,
     clearSession,
+    paymentMethod,
+    setPaymentMethod,
+    sessionTotalPaid,
+    sessionAccumulatedBill,
+    updateSessionAccounting,
+    getCurrentOrderTotal,
+    getFulfillmentType,
   } = useTabStore();
 
   // Use SWR for robust, high-performance data fetching
@@ -146,6 +168,25 @@ function MenuContent() {
     });
   }, [searchParams]);
 
+  // Request browser notification permission once after first user interaction
+  const notifRequested = useRef(false);
+  const ensureNotifPermission = () => {
+    if (!notifRequested.current) {
+      notifRequested.current = true;
+      requestNotificationPermission();
+    }
+  };
+
+  // Fetch session accounting summary when session changes
+  useEffect(() => {
+    if (!sessionId) return;
+    getSessionSummaryAction(sessionId).then((res) => {
+      if (res.success && res.data) {
+        updateSessionAccounting(res.data.total_paid, res.data.total_bill);
+      }
+    });
+  }, [sessionId]);
+
   // Handle Order Real-time Tracking
   useEffect(() => {
     if (!sessionId) return;
@@ -157,19 +198,71 @@ function MenuContent() {
     };
     fetchOrders();
 
-    // 2. Subscribe to changes
+    // 2. Subscribe to order changes
     const channel = orderAPI.subscribeToOrders(sessionId, (payload) => {
       console.log('Order Change Received:', payload);
       fetchOrders(); // Re-fetch on any change for simplicity/reliability
-      
-      // If an order became 'ready' or 'served', show tracker
-      if (payload.new && ['ready', 'served'].includes(payload.new.status) && !['ready', 'served'].includes(payload.old?.status)) {
+
+      const newStatus = payload.new?.status;
+      const oldStatus = payload.old?.status;
+
+      // Order moved to 'ready' — play alert and push notification
+      if (newStatus === 'ready' && oldStatus !== 'ready') {
+        playOrderReady();
+        showNotification('🍽️ Your order is ready!', 'Head to the counter — your food is waiting.');
         setShowTracker(true);
+      }
+      // Order moved to 'preparing'
+      if (newStatus === 'preparing' && oldStatus === 'pending') {
+        playSuccess();
       }
     });
 
+    // 3. Subscribe to session status changes (detects admin cancellation OR payment closure)
+    const sessionChannel = supabase
+      .channel(`session-status-${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'sessions',
+          filter: `id=eq.${sessionId}`,
+        },
+        (payload: any) => {
+          const newStatus = payload.new?.status;
+          if (newStatus === 'cancelled') {
+            // Admin explicitly cancelled the session
+            console.log('Session cancelled by admin, clearing local state');
+            playError();
+            showNotification('Session cancelled', 'Your session was cancelled by the staff.');
+            setSessionCancelled(true);
+            setActiveOrders([]);
+            clearCart();
+            setShowCart(false);
+            setShowTracker(false);
+            clearSession();
+            setToast({
+              message: 'Your session was cancelled by the staff.',
+              type: 'error'
+            });
+          } else if (newStatus === 'closed') {
+            // Session closed due to payment being fully settled — do NOT wipe session.
+            console.log('Session closed after payment — keeping local state for order tracking.');
+            playPaymentSuccess();
+            showNotification('✅ Payment confirmed!', 'Your order is now being prepared.');
+            setToast({
+              message: '✅ Payment confirmed! Your order is being prepared.',
+              type: 'success'
+            });
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       channel.unsubscribe();
+      sessionChannel.unsubscribe();
     };
   }, [sessionId]);
 
@@ -225,6 +318,11 @@ function MenuContent() {
     }
   };
 
+  const signatureItems = useMemo(() => {
+    if (!menuItems) return [];
+    return menuItems.filter(item => item.is_signature && item.is_available);
+  }, [menuItems]);
+
   const filteredItems = useMemo(() => {
     return menuItems.filter(item => {
       const matchesCategory = selectedCategory === 'all' 
@@ -236,12 +334,14 @@ function MenuContent() {
   }, [menuItems, selectedCategory, searchQuery]);
 
   const handleAddToCart = (item: MenuItem) => {
+    ensureNotifPermission();
     if (!sessionId) {
       setPendingItem(item);
       setShowTableModal(true);
       return;
     }
     addToCart({ ...item, price: typeof item.price === 'string' ? parseFloat(item.price) : item.price });
+    playCartAdd();
     gsap.fromTo('.cart-btn', { scale: 1 }, { scale: 1.1, duration: 0.15, yoyo: true, repeat: 1 });
   };
 
@@ -253,7 +353,7 @@ function MenuContent() {
     try {
       const { data: sessionData, error: sessionError } = await sessionAPI.get(sessionId);
       
-      if (sessionError || !sessionData || sessionData.status !== 'open') {
+      if (sessionError || !sessionData || !['open', 'closed'].includes(sessionData.status)) {
         setToast({ message: 'Your session has expired. Please join again.', type: 'error' });
         clearCart();
         setShowCart(false);
@@ -261,18 +361,34 @@ function MenuContent() {
         return;
       }
       
+      const fulfillmentType = getFulfillmentType();
       const items = cartItems.map(item => ({ menu_item_id: item.id, quantity: item.quantity }));
-      const result = await placeOrderAction(sessionId, items, '', sessionToken || '');
+      const noteToSend = orderNote.trim();
+      const result = await placeOrderAction(sessionId, items, noteToSend, sessionToken || '', fulfillmentType);
       
       if (result.success) {
-        // Success notification handled by state/subscription
+        // Update session accounting from the RPC response
+        if (result.data) {
+          const orderTotal = (result.data.subtotal || 0) * 1.25; // sub + 15% VAT + 10% service
+          updateSessionAccounting(sessionTotalPaid, sessionAccumulatedBill + orderTotal);
+        }
+
         clearCart();
+        setOrderNote('');
         setShowCart(false);
         setShowTracker(true);
-        setToast({ message: 'Order sent to the kitchen!', type: 'success' });
+        playOrderPlaced();
+
+        // Conditional messaging based on fulfillment type
+        if (fulfillmentType === 'pay_later') {
+          setToast({ message: '🍽️ Order sent to kitchen!', type: 'success' });
+        } else {
+          setToast({ message: '⏳ Awaiting payment to start preparation.', type: 'info' });
+        }
       } else {
         const error = result.error;
         const errorCode = (result as any).errorCode;
+        playError();
 
         if (errorCode === 'RATE_LIMITED') {
           setToast({ message: 'Too many orders! Please wait a bit.', type: 'error' });
@@ -297,6 +413,18 @@ function MenuContent() {
     setSettlingPayment(true);
     setPaymentError(null);
     try {
+      // Verify session is still open before attempting payment
+      const { data: sessionData, error: sessionError } = await sessionAPI.get(sessionId);
+      if (sessionError || !sessionData || sessionData.status !== 'open') {
+        setPaymentError('Your session is no longer active. It may have been cancelled.');
+        clearCart();
+        clearSession();
+        setActiveOrders([]);
+        setShowTracker(false);
+        setSettlingPayment(false);
+        return;
+      }
+
       const result = await initiatePaymentAction(sessionId);
       if (result.success) {
         // Redirect to a specialized payment instruction page
@@ -319,6 +447,57 @@ function MenuContent() {
 
   return (
     <div style={{ minHeight: '100svh', background: '#F9F9F9', paddingBottom: '8rem', fontFamily: 'var(--font-instrument), system-ui, sans-serif' }}>
+      <style>{`
+        .menu-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+          gap: 1rem;
+        }
+        .menu-card-img {
+          height: 130px;
+        }
+        .menu-card-content {
+          padding: 1rem;
+        }
+        .menu-card-title {
+          font-size: 0.95rem;
+        }
+        .menu-card-price {
+          font-size: 0.95rem;
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+          display: none;
+        }
+        .hide-scrollbar {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
+        
+        @media (min-width: 640px) {
+          .menu-grid {
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 1.5rem;
+          }
+          .menu-card-img {
+            height: 220px;
+          }
+          .menu-card-content {
+            padding: 1.5rem;
+          }
+          .menu-card-title {
+            font-size: 1.15rem;
+          }
+          .menu-card-price {
+            font-size: 1.15rem;
+          }
+          .modal-content-inner {
+            padding: 0 2.5rem 2.5rem !important;
+          }
+          .modal-item-title {
+            font-size: 2.5rem !important;
+          }
+        }
+      `}</style>
       {/* Ambient glows */}
       <div style={{ position: 'fixed', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 0 }}>
         <div style={{ position: 'absolute', top: '-10%', right: '-5%', width: 600, height: 600, borderRadius: '50%', background: 'radial-gradient(circle, rgba(253,202,0,0.06) 0%, transparent 70%)', filter: 'blur(80px)' }} />
@@ -364,8 +543,13 @@ function MenuContent() {
                 </div>
                 <div style={{ width: 1, height: 12, background: 'rgba(5,80,60,0.1)' }} />
                 <button 
-                  onClick={() => {
-                    if (confirm('Leave this table? Your current cart will be cleared.')) {
+                  onClick={async () => {
+                    const confirmed = await dialog.showConfirm(
+                      'Leave Table?',
+                      'Your current cart will be cleared and you will need to rejoin a table to place new orders.',
+                      { confirmLabel: 'Leave Table', cancelLabel: 'Stay' }
+                    );
+                    if (confirmed) {
                       clearSession();
                       window.location.href = '/menu';
                     }
@@ -460,60 +644,120 @@ function MenuContent() {
             </div>
           </div>
 
-          {/* Category Filter Buttons */}
-          <div style={{ 
-            display: 'flex', 
-            overflowX: 'auto', 
-            gap: '0.6rem', 
-            padding: '0.5rem 0',
-            scrollbarWidth: 'none',
-            msOverflowStyle: 'none',
-            WebkitOverflowScrolling: 'touch',
-            justifyContent: 'flex-start',
-          }}>
-            <style>{`
-              div::-webkit-scrollbar { display: none; }
-            `}</style>
-            {categories.map((cat: any) => {
-              const isActive = selectedCategory === cat.id;
-              return (
-                <button
-                  key={cat.id}
-                  onClick={() => setSelectedCategory(cat.id)}
-                  style={{
-                    padding: '0.6rem 1.25rem',
-                    borderRadius: '999px',
-                    border: '1.5px solid',
-                    borderColor: isActive ? '#fdca00' : 'rgba(5,80,60,0.1)',
-                    background: isActive ? '#fdca00' : '#ffffff',
-                    color: '#05503c',
-                    fontFamily: 'var(--font-bricolage)',
-                    fontWeight: 700,
-                    fontSize: '0.8rem',
-                    whiteSpace: 'nowrap',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                    boxShadow: isActive ? '0 4px 15px rgba(253,202,0,0.25)' : 'none',
-                  }}
-                >
-                  {cat.label}
-                </button>
-              );
-            })}
+          {/* Category Filters */}
+          <div 
+            className="hide-scrollbar"
+            style={{ 
+              display: 'flex', 
+              overflowX: 'auto', 
+              gap: '0.75rem', 
+              paddingBottom: '0.5rem',
+              width: '100%'
+            }}
+          >
+            {categories.map((cat: any) => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedCategory(cat.id)}
+                style={{
+                  flexShrink: 0,
+                  padding: '0.6rem 1.25rem',
+                  borderRadius: '2rem',
+                  background: selectedCategory === cat.id ? '#05503c' : 'rgba(5,80,60,0.05)',
+                  color: selectedCategory === cat.id ? '#ffffff' : '#05503c',
+                  border: selectedCategory === cat.id ? 'none' : '1px solid rgba(5,80,60,0.1)',
+                  fontFamily: 'var(--font-bricolage)',
+                  fontWeight: 700,
+                  fontSize: '0.85rem',
+                  transition: 'all 0.2s',
+                  cursor: 'pointer'
+                }}
+              >
+                {cat.label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
 
+      {/* ── Signature / Chef's Picks Section ── */}
+      {signatureItems.length > 0 && (
+        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '1.5rem 1.5rem 0', position: 'relative', zIndex: 1 }}>
+          <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <span style={{ fontSize: '1.4rem' }}>⭐</span>
+            <div>
+              <p style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.15em', color: '#fdca00', marginBottom: '0.1rem' }}>Featured</p>
+              <h3 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.2rem', color: '#05503c', letterSpacing: '-0.02em', lineHeight: 1 }}>Chef's Picks</h3>
+            </div>
+          </div>
+          <div
+            className="hide-scrollbar"
+            style={{ display: 'flex', overflowX: 'auto', gap: '1rem', paddingBottom: '0.5rem' }}
+          >
+            {signatureItems.map(item => (
+              <div
+                key={item.id}
+                onClick={() => setSelectedItem(item)}
+                style={{
+                  flexShrink: 0,
+                  width: 200,
+                  background: 'linear-gradient(135deg, #05503c 0%, #0a6b51 100%)',
+                  borderRadius: 24,
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  boxShadow: '0 8px 30px rgba(5,80,60,0.18)',
+                  transition: 'transform 0.25s cubic-bezier(0.34,1.56,0.64,1)',
+                  position: 'relative',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.04)')}
+                onMouseLeave={e => (e.currentTarget.style.transform = 'scale(1)')}
+              >
+                <div style={{ height: 120, overflow: 'hidden', position: 'relative' }}>
+                  {item.image_url ? (
+                    <img src={item.image_url} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }} />
+                  ) : (
+                    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <span style={{ fontSize: '2.5rem' }}>☕</span>
+                    </div>
+                  )}
+                  {/* Star badge */}
+                  <div style={{ position: 'absolute', top: '0.6rem', right: '0.6rem', background: '#fdca00', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem', boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}>⭐</div>
+                  <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 60, background: 'linear-gradient(to top, #05503c, transparent)' }} />
+                </div>
+                <div style={{ padding: '0.85rem 1rem 1rem' }}>
+                  <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.95rem', color: '#ffffff', lineHeight: 1.2, marginBottom: '0.4rem' }}>{item.name}</p>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <p style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.6)' }}>{item.category}</p>
+                    <p style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.9rem', color: '#fdca00' }}>{Number(item.price).toFixed(0)} ETB</p>
+                  </div>
+                  <button
+                    onClick={e => { e.stopPropagation(); if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item); }}
+                    disabled={item.stock_quantity <= 0 || isJoining}
+                    style={{
+                      marginTop: '0.75rem', width: '100%', padding: '0.55rem',
+                      borderRadius: 12, border: '1.5px solid rgba(253,202,0,0.4)',
+                      background: 'rgba(253,202,0,0.12)', color: '#fdca00',
+                      fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.75rem',
+                      cursor: item.stock_quantity <= 0 || isJoining ? 'not-allowed' : 'pointer',
+                      opacity: item.stock_quantity <= 0 || isJoining ? 0.5 : 1,
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {item.stock_quantity <= 0 ? 'Sold Out' : '+ Add to Order'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Menu grid */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '1rem 0.75rem', position: 'relative', zIndex: 1 }}>
+      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '2rem 1.5rem', position: 'relative', zIndex: 1 }}>
         {menuLoading && menuItems.length === 0 ? (
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 150px), 1fr))', 
-            gap: '0.75rem' 
-          }}>
+          <div className="menu-grid">
             {[1, 2, 3, 4, 5, 6].map(i => (
-              <div key={i} style={{ height: 280, borderRadius: 20, background: 'rgba(5,80,60,0.03)', animation: 'pulse 1.5s infinite ease-in-out' }} />
+              <div key={i} style={{ height: 300, borderRadius: 24, background: 'rgba(5,80,60,0.03)', animation: 'pulse 1.5s infinite ease-in-out' }} />
             ))}
             <style>{`@keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }`}</style>
           </div>
@@ -523,27 +767,21 @@ function MenuContent() {
             <p style={{ fontFamily: 'var(--font-bricolage)', fontSize: '1.2rem', color: '#05503c' }}>No items found</p>
           </div>
         ) : (
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 150px), 1fr))', 
-            gap: '0.75rem' 
-          }}>
+          <div className="menu-grid">
             {filteredItems.map(item => (
               <div
                 key={item.id}
                 className="menu-card"
                 onClick={() => setSelectedItem(item)}
                 style={{
-                  background: '#ffffff', borderRadius: 20, overflow: 'hidden',
+                  background: '#ffffff', borderRadius: 28, overflow: 'hidden',
                   border: '1px solid rgba(5,80,60,0.06)',
-                  boxShadow: '0 4px 20px rgba(5,80,60,0.03)',
+                  boxShadow: '0 4px 30px rgba(5,80,60,0.04)',
                   transition: 'transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  flexDirection: 'column'
+                  cursor: 'pointer'
                 }}
               >
-                <div style={{ position: 'relative', height: 140, overflow: 'hidden' }}>
+                <div className="menu-card-img" style={{ position: 'relative', overflow: 'hidden' }}>
                   {item.image_url ? (
                     <img
                       src={item.image_url}
@@ -585,71 +823,33 @@ function MenuContent() {
                   </div>
                 </div>
 
-                <div style={{ padding: '0.75rem', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.4rem', gap: '0.4rem' }}>
-                    <h3 style={{ 
-                      fontFamily: 'var(--font-bricolage)', 
-                      fontWeight: 800, 
-                      fontSize: '0.9rem', 
-                      color: '#05503c', 
-                      letterSpacing: '-0.01em',
-                      lineHeight: 1.2,
-                      flex: 1
-                    }}>
-                      {item.name}
-                    </h3>
-                    <p style={{ 
-                      fontFamily: 'var(--font-bricolage)', 
-                      fontWeight: 800, 
-                      color: '#fdca00', 
-                      fontSize: '0.9rem',
-                      whiteSpace: 'nowrap'
-                    }}>
-                      {Number(item.price).toFixed(0)} <span style={{ fontSize: '0.55rem' }}>ETB</span>
-                    </p>
+                <div className="menu-card-content">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
+                    <h3 className="menu-card-title" style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, color: '#05503c', letterSpacing: '-0.02em' }}>{item.name}</h3>
+                    <p className="menu-card-price" style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, color: '#fdca00' }}>{Number(item.price).toFixed(0)} <span style={{ fontSize: '0.65rem' }}>ETB</span></p>
                   </div>
-                  
-                  {/* Hide description on mobile to keep it compact */}
-                  <p style={{ 
-                    fontSize: '0.7rem', 
-                    color: 'rgba(5,80,60,0.5)', 
-                    lineHeight: 1.4, 
-                    marginBottom: '0.75rem', 
-                    height: '2rem', 
-                    overflow: 'hidden', 
-                    display: '-webkit-box', 
-                    WebkitLineClamp: 2, 
-                    WebkitBoxOrient: 'vertical' 
-                  }}>
+                  <p style={{ fontSize: '0.85rem', color: 'rgba(5,80,60,0.6)', lineHeight: 1.5, marginBottom: '1.5rem', height: '2.55rem', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
                     {item.description}
                   </p>
-                  
-                  <div style={{ marginTop: 'auto' }}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item);
-                      }}
-                      disabled={item.stock_quantity <= 0 || isJoining}
-                      className="btn-primary shimmer-btn"
-                      style={{ 
-                        width: '100%', 
-                        padding: '0.5rem',
-                        fontSize: '0.7rem',
-                        display: 'flex', 
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        gap: '0.3rem',
-                        opacity: (item.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
-                        cursor: (item.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer',
-                        background: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.1)' : undefined,
-                        color: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.4)' : undefined,
-                        borderRadius: '12px'
-                      }}
-                    >
-                      <Plus size={12} /> {isJoining ? '...' : item.stock_quantity <= 0 ? 'Sold Out' : 'Order'}
-                    </button>
-                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (item.stock_quantity > 0 && !isJoining) handleAddToCart(item);
+                    }}
+                    disabled={item.stock_quantity <= 0 || isJoining}
+                    className="btn-primary shimmer-btn"
+                    style={{ 
+                      width: '100%', 
+                      display: 'flex', 
+                      justifyContent: 'center',
+                      opacity: (item.stock_quantity <= 0 || isJoining) ? 0.5 : 1,
+                      cursor: (item.stock_quantity <= 0 || isJoining) ? 'not-allowed' : 'pointer',
+                      background: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.1)' : undefined,
+                      color: (item.stock_quantity <= 0 || isJoining) ? 'rgba(5,80,60,0.4)' : undefined
+                    }}
+                  >
+                    <Plus size={16} /> {isJoining ? 'Joining Table...' : item.stock_quantity <= 0 ? 'Sold Out' : 'Add to Order'}
+                  </button>
                 </div>
               </div>
             ))}
@@ -698,9 +898,66 @@ function MenuContent() {
               )}
             </div>
 
+            {/* Special instructions field — always shown when cart has items or even when empty (gives it a permanent home) */}
+            <div style={{ padding: '0 2rem 1.5rem', borderTop: cartItems.length > 0 ? '1px solid rgba(5,80,60,0.06)' : 'none', paddingTop: cartItems.length > 0 ? '1.5rem' : 0 }}>
+              {cartItems.length > 0 && (
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(5,80,60,0.4)', marginBottom: '0.5rem' }}>
+                    Special Instructions / Allergies
+                  </label>
+                  <textarea
+                    value={orderNote}
+                    onChange={e => setOrderNote(e.target.value)}
+                    placeholder="e.g. No onions, extra sauce, allergic to nuts…"
+                    maxLength={300}
+                    rows={3}
+                    style={{
+                      width: '100%', boxSizing: 'border-box',
+                      padding: '0.9rem 1rem', borderRadius: 14,
+                      border: '1.5px solid rgba(5,80,60,0.1)',
+                      background: '#ffffff', color: '#05503c',
+                      fontFamily: 'var(--font-instrument)', fontSize: '0.9rem',
+                      lineHeight: 1.5, resize: 'none', outline: 'none',
+                      transition: 'border-color 0.2s, box-shadow 0.2s'
+                    }}
+                    onFocus={e => { e.currentTarget.style.borderColor = '#fdca00'; e.currentTarget.style.boxShadow = '0 4px 16px rgba(253,202,0,0.1)'; }}
+                    onBlur={e => { e.currentTarget.style.borderColor = 'rgba(5,80,60,0.1)'; e.currentTarget.style.boxShadow = 'none'; }}
+                  />
+                  <p style={{ fontSize: '0.65rem', color: 'rgba(5,80,60,0.3)', textAlign: 'right', marginTop: '0.3rem' }}>{orderNote.length}/300</p>
+                </div>
+              )}
+            </div>
+
             {cartItems.length > 0 && (
               <div style={{ padding: '2rem', background: '#fff', borderTop: '1px solid rgba(5,80,60,0.07)' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1.5rem' }}>
+                {/* Session Summary — appears for follow-up orders */}
+                {sessionTotalPaid > 0 && (
+                  <div style={{
+                    background: 'rgba(253,202,0,0.06)',
+                    border: '1px solid rgba(253,202,0,0.15)',
+                    borderRadius: 16,
+                    padding: '1rem',
+                    marginBottom: '1.25rem'
+                  }}>
+                    <p style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(5,80,60,0.4)', marginBottom: '0.6rem' }}>Session Summary</p>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#05503c', marginBottom: '0.3rem' }}>
+                      <span>Already Paid</span>
+                      <span style={{ fontWeight: 800, color: '#22c55e' }}>{sessionTotalPaid.toFixed(0)} ETB</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#05503c', marginBottom: '0.3rem' }}>
+                      <span>Session Total</span>
+                      <span style={{ fontWeight: 700 }}>{sessionAccumulatedBill.toFixed(0)} ETB</span>
+                    </div>
+                    <div style={{ height: 1, background: 'rgba(253,202,0,0.2)', margin: '0.4rem 0' }} />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#05503c', fontWeight: 800 }}>
+                      <span>Outstanding</span>
+                      <span style={{ color: '#fdca00' }}>{Math.max(0, sessionAccumulatedBill - sessionTotalPaid).toFixed(0)} ETB</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Current Order Breakdown */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1.25rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: 'rgba(5,80,60,0.5)', fontSize: '0.9rem' }}>
                     <span>Subtotal</span>
                     <span>{subtotal.toFixed(0)} ETB</span>
@@ -714,17 +971,78 @@ function MenuContent() {
                     <span>{service.toFixed(0)} ETB</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: '1.2rem', color: '#05503c', marginTop: '0.4rem', paddingTop: '1rem', borderTop: '1px dashed rgba(5,80,60,0.1)' }}>
-                    <span>Total</span>
+                    <span>Order Total</span>
                     <span style={{ color: '#fdca00' }}>{total.toFixed(0)} ETB</span>
                   </div>
                 </div>
+
+                {/* Payment Method Selector */}
+                <div style={{ marginBottom: '1.25rem' }}>
+                  <p style={{ fontSize: '0.7rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(5,80,60,0.4)', marginBottom: '0.6rem' }}>Payment Method</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                    <button
+                      onClick={() => setPaymentMethod('cash')}
+                      style={{
+                        padding: '0.9rem 1rem',
+                        borderRadius: 14,
+                        border: paymentMethod === 'cash' ? '2px solid #05503c' : '1.5px solid rgba(5,80,60,0.1)',
+                        background: paymentMethod === 'cash' ? 'rgba(5,80,60,0.05)' : '#fff',
+                        cursor: 'pointer',
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.4rem',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <span style={{ fontSize: '1.3rem' }}>💵</span>
+                      <span style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.8rem', color: '#05503c' }}>Cash</span>
+                      <span style={{ fontSize: '0.6rem', color: 'rgba(5,80,60,0.4)', fontWeight: 600, lineHeight: 1.3 }}>Pay at counter</span>
+                    </button>
+                    <button
+                      onClick={() => setPaymentMethod('mobile')}
+                      style={{
+                        padding: '0.9rem 1rem',
+                        borderRadius: 14,
+                        border: paymentMethod === 'mobile' ? '2px solid #fdca00' : '1.5px solid rgba(5,80,60,0.1)',
+                        background: paymentMethod === 'mobile' ? 'rgba(253,202,0,0.06)' : '#fff',
+                        cursor: 'pointer',
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.4rem',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <span style={{ fontSize: '1.3rem' }}>📱</span>
+                      <span style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '0.8rem', color: '#05503c' }}>Mobile</span>
+                      <span style={{ fontSize: '0.6rem', color: 'rgba(5,80,60,0.4)', fontWeight: 600, lineHeight: 1.3 }}>Sheger Pay</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Fulfillment Info Banner */}
+                <div style={{
+                  padding: '0.75rem 1rem',
+                  borderRadius: 12,
+                  background: paymentMethod === 'cash' ? 'rgba(34,197,94,0.06)' : 'rgba(253,202,0,0.06)',
+                  border: `1px solid ${paymentMethod === 'cash' ? 'rgba(34,197,94,0.15)' : 'rgba(253,202,0,0.15)'}`,
+                  marginBottom: '1.25rem',
+                  display: 'flex', alignItems: 'center', gap: '0.6rem'
+                }}>
+                  <span style={{ fontSize: '0.95rem' }}>{paymentMethod === 'cash' ? '🍽️' : '⏳'}</span>
+                  <p style={{
+                    fontSize: '0.75rem', fontWeight: 600,
+                    color: paymentMethod === 'cash' ? '#15803d' : '#a16207',
+                    lineHeight: 1.4
+                  }}>
+                    {paymentMethod === 'cash'
+                      ? 'Your order will be sent to the kitchen immediately. Pay at the counter when you\'re done.'
+                      : 'Kitchen preparation starts after your mobile payment is verified via Sheger Pay.'}
+                  </p>
+                </div>
+
                 <button
                   onClick={handlePlaceOrder}
                   disabled={placingOrder}
                   className="btn-primary shimmer-btn"
                   style={{ width: '100%', padding: '1.2rem', borderRadius: 20, fontSize: '1rem' }}
                 >
-                  {placingOrder ? 'Sending to Kitchen...' : 'Confirm Order'}
+                  {placingOrder ? 'Sending to Kitchen...' : paymentMethod === 'cash' ? 'Confirm Order' : 'Confirm & Pay'}
                 </button>
               </div>
             )}
@@ -1030,7 +1348,7 @@ function MenuContent() {
                 }} />
               </div>
 
-              <div style={{ padding: '0 2.5rem 2.5rem' }}>
+              <div className="modal-content-inner" style={{ padding: '0 1.5rem 1.5rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                   <span style={{
                     background: 'rgba(5,80,60,0.05)', borderRadius: '9999px', padding: '0.4rem 1rem',
@@ -1044,7 +1362,7 @@ function MenuContent() {
                   </p>
                 </div>
 
-                <h2 style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '2.5rem', color: '#05503c', letterSpacing: '-0.04em', lineHeight: 1.1, marginBottom: '1.5rem' }}>
+                <h2 className="modal-item-title" style={{ fontFamily: 'var(--font-bricolage)', fontWeight: 800, fontSize: '1.75rem', color: '#05503c', letterSpacing: '-0.04em', lineHeight: 1.1, marginBottom: '1.5rem' }}>
                   {selectedItem.name}
                 </h2>
 

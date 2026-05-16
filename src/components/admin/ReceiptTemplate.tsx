@@ -48,7 +48,6 @@ export const ReceiptTemplate = ({ order, payment }: ReceiptProps) => {
         lineHeight: '1.5',
         padding: '8mm 5mm',
       }}
-      className="print:block hidden"
     >
       {/* ── Header ── */}
       <div style={{ textAlign: 'center', marginBottom: '6mm', paddingBottom: '5mm', borderBottom: '1px dashed #aaaaaa' }}>
