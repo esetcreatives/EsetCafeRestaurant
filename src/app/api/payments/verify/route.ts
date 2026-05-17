@@ -4,10 +4,9 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 // The SDK automatically handles the Test/Live environment 
 // based on the prefix of your secret key (shp_test_ vs shp_live_)
-const sheger = new ShegerPay(process.env.SHEGERPAY_SECRET_KEY!);
-
 export async function POST(req: Request) {
   try {
+    const sheger = new ShegerPay(process.env.SHEGERPAY_SECRET_KEY!);
     const { transaction_code, amount, provider, paymentId } = await req.json();
 
     if (!paymentId) throw new Error("Payment ID is required");
