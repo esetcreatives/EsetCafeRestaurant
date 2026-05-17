@@ -216,11 +216,19 @@ export const sessionAPI = {
 
 // Order API
 export const orderAPI = {
-  place: async (sessionId: number, items: any[], notes?: string): Promise<ApiResponse<OrderResponse>> => {
+  place: async (
+    sessionId: number,
+    items: any[],
+    notes?: string,
+    sessionToken: string = '',
+    fulfillmentType: 'pay_first' | 'pay_later' = 'pay_later'
+  ): Promise<ApiResponse<OrderResponse>> => {
     const { data, error } = await supabase.rpc('place_order', {
       p_session_id: sessionId,
+      p_session_token: sessionToken,
       p_items: items,
-      p_notes: notes || ''
+      p_notes: notes || '',
+      p_fulfillment_type: fulfillmentType
     });
 
     if (error) return { error: error.message };

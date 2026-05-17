@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, Fragment } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -2920,9 +2920,8 @@ export default function AdminDashboard() {
                                 const snap = log.snapshot || {};
                                 const snapLines = Object.entries(snap).map(([k, v]) => `${k.replace(/_/g,' ')}: ${v}`);
                                 return (
-                                  <>
+                                  <Fragment key={log.id}>
                                     <tr
-                                      key={log.id}
                                       onClick={() => setAuditExpandedRow(isExpanded ? null : log.id)}
                                       style={{
                                         borderBottom: isExpanded ? 'none' : '1px solid rgba(5,80,60,0.05)',
@@ -2993,7 +2992,7 @@ export default function AdminDashboard() {
                                         </td>
                                       </tr>
                                     )}
-                                  </>
+                                  </Fragment>
                                 );
                               })}
                             </tbody>

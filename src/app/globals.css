@@ -365,3 +365,16 @@ img { display: block; }
   }
 }
 
+/* ── HERO ANIMATIONS ───────────────────────────────── */
+@keyframes scrollPulse {
+  0%, 100% { opacity: 0.3; transform: scaleY(1); }
+  50%      { opacity: 1;   transform: scaleY(1.15); }
+}
+
+/* Hide floating hero images on small screens to keep it clean */
+@media (max-width: 768px) {
+  .hero-float-img {
+    display: none !important;
+  }
+}
+
